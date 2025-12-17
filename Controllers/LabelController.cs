@@ -22,6 +22,8 @@ namespace RemotePrintService.Controllers
             _logger = logger;
         }
 
+
+
         /// <summary>
         /// 根据数字生成标签PDF文件
         /// </summary>
