@@ -1,34 +1,52 @@
 using Scalar.AspNetCore;
 using RemotePrintService.Services;
+using Spectre.Console;
 
 namespace RemotePrintService
 {
+    /// <summary>
+    /// 应用程序入口点类
+    /// </summary>
     public class Program
     {
+        /// <summary>
+        /// 应用程序入口点方法
+        /// </summary>
+        /// <param name="args">命令行参数</param>
         public static void Main(string[] args)
         {
+            // 使用 Spectre.Console 显示启动信息
+            AnsiConsole.Write(new FigletText("Remote Print Service").Color(Color.Blue));
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("[green]正在启动远程打印服务...[/]");
+            AnsiConsole.WriteLine();
+
             var builder = WebApplication.CreateBuilder(args);
 
-            // Add services to the container.
+            // 配置 Kestrel 服务器绑定到所有网络接口
+            builder.WebHost.ConfigureKestrel(serverOptions =>
+            {
+                serverOptions.ListenAnyIP(5035); // 监听所有网络接口的 5035 端口
+            });
 
+            // 添加控制器服务
             builder.Services.AddControllers();
-            // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+            
+            // 添加 OpenAPI 支持
             builder.Services.AddOpenApi();
             
-            // Register printer service (使用 Adobe Acrobat DC 打印 PDF)
+            // 注册打印机服务
             builder.Services.AddScoped<IPrinterService, LocalPrinterService>();
 
             var app = builder.Build();
 
-            // Configure the HTTP request pipeline.
-            if (app.Environment.IsDevelopment())
-            {
-                app.MapOpenApi();
-            }
+            // 启用 OpenAPI 文档（无论什么环境都启用）
+            app.MapOpenApi();
 
+            // 添加授权中间件
             app.UseAuthorization();
 
-            // Chain multiple documents
+            // 配置 Scalar API 文档界面（无论什么环境都启用）
             app.MapScalarApiReference(options =>
             {
                 options.AddDocument("v1", "Production API", "api/v1/openapi.json")
@@ -36,8 +54,21 @@ namespace RemotePrintService
                        .AddDocument("internal", "Internal API", "internal/openapi.json");
             });
 
+            // 映射控制器路由
             app.MapControllers();
 
+            // 使用 Spectre.Console 显示服务启动完成信息
+            AnsiConsole.MarkupLine("[bold green]远程打印服务启动完成！[/]");
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine($"[yellow]运行环境:[/] {app.Environment.EnvironmentName}");
+            
+            // 安全地获取第一个URL，避免序列为空时的异常
+            var firstUrl = app.Urls.FirstOrDefault()?.TrimEnd('/') ?? "http://localhost:5035";
+            AnsiConsole.MarkupLine($"[yellow]监听地址:[/] {string.Join(", ", app.Urls)}");
+            AnsiConsole.WriteLine();
+            AnsiConsole.MarkupLine("[blue]API 文档地址: [/][link]{0}/scalar/v2-beta[/]", firstUrl);
+
+            // 启动应用程序
             app.Run();
         }
     }

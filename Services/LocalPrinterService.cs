@@ -3,11 +3,12 @@ using System.Drawing.Printing;
 using PdfSharp.Pdf.IO;
 using RemotePrintService.Models;
 using Microsoft.Extensions.Configuration;
+using Spectre.Console;
 
 namespace RemotePrintService.Services
 {
     /// <summary>
-    /// 本地打印机服务实现
+    /// 本地打印机服务实现类
     /// </summary>
     public class LocalPrinterService : IPrinterService
     {
@@ -21,7 +22,7 @@ namespace RemotePrintService.Services
         }
 
         /// <summary>
-        /// 获取所有可用的本地打印机
+        /// 获取所有可用的本地打印机列表
         /// </summary>
         public async Task<List<PrinterInfo>> GetAvailablePrintersAsync()
         {
@@ -29,13 +30,12 @@ namespace RemotePrintService.Services
 
             try
             {
-                // 使用 System.Drawing.Printing 获取本地打印机
                 foreach (string printerName in PrinterSettings.InstalledPrinters)
                 {
                     try
                     {
                         var settings = new PrinterSettings { PrinterName = printerName };
-                        var isDefault = printerName == GetDefaultPrinterName();
+                        var isDefault = printerName == await GetDefaultPrinterName();
                         
                         var printer = new PrinterInfo
                         {
@@ -44,30 +44,30 @@ namespace RemotePrintService.Services
                             Port = 0,
                             IsDefault = isDefault,
                             Description = $"本地打印机 - {printerName}",
-                            IsOnline = !settings.IsPlotter // 简单检查
+                            IsOnline = !settings.IsPlotter
                         };
 
                         printers.Add(printer);
-                        _logger.LogInformation($"Found local printer: {printerName}");
+                        _logger.LogInformation($"发现本地打印机: {printerName}");
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, $"Error getting info for printer: {printerName}");
+                        _logger.LogWarning(ex, $"获取打印机信息时发生错误: {printerName}");
                     }
                 }
 
-                _logger.LogInformation($"Found {printers.Count} local printers");
+                _logger.LogInformation($"共找到 {printers.Count} 个本地打印机");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting available local printers");
+                _logger.LogError(ex, "获取可用本地打印机时发生错误");
             }
 
             return await Task.FromResult(printers);
         }
 
         /// <summary>
-        /// 获取指定打印机的信息
+        /// 获取指定打印机的详细信息
         /// </summary>
         public async Task<PrinterInfo?> GetPrinterInfoAsync(string printerName)
         {
@@ -78,7 +78,9 @@ namespace RemotePrintService.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"Error getting printer info for {printerName}");
+                // 使用 Spectre.Console 显示错误信息
+                AnsiConsole.MarkupLine($"[red]获取打印机信息时发生错误[/]: {printerName} - {ex.Message}");
+                _logger.LogError(ex, $"获取打印机信息时发生错误: {printerName}");
                 return null;
             }
         }
@@ -90,9 +92,9 @@ namespace RemotePrintService.Services
         {
             try
             {
-                // 验证文件是否存在
                 if (!File.Exists(request.FilePath))
                 {
+                    _logger.LogInformation($"文件不存在: {request.FilePath}");
                     return new PrintResponse
                     {
                         Success = false,
@@ -100,11 +102,11 @@ namespace RemotePrintService.Services
                     };
                 }
 
-                // 获取目标打印机名称
-                string printerName = request.PrinterName ?? GetDefaultPrinterName();
+                string printerName = request.PrinterName ?? await GetDefaultPrinterName();
 
                 if (string.IsNullOrEmpty(printerName))
                 {
+                    _logger.LogWarning("未找到默认打印机");
                     return new PrintResponse
                     {
                         Success = false,
@@ -112,10 +114,10 @@ namespace RemotePrintService.Services
                     };
                 }
 
-                // 验证打印机是否存在
                 var printerInfo = await GetPrinterInfoAsync(printerName);
                 if (printerInfo == null)
                 {
+                    _logger.LogWarning($"打印机不存在: {printerName}");
                     return new PrintResponse
                     {
                         Success = false,
@@ -123,9 +125,9 @@ namespace RemotePrintService.Services
                     };
                 }
 
-                // 检查打印机是否在线
                 if (!await IsPrinterOnlineAsync(printerName))
                 {
+                    _logger.LogWarning($"打印机离线: {printerName}");
                     return new PrintResponse
                     {
                         Success = false,
@@ -135,19 +137,17 @@ namespace RemotePrintService.Services
 
                 string jobId = Guid.NewGuid().ToString("N");
 
-                // 根据文件类型处理
                 string fileExtension = Path.GetExtension(request.FilePath).ToLower();
 
-                // 对于 PDF 文件，使用 Adobe Acrobat 打印
                 if (fileExtension == ".pdf")
                 {
-                    _logger.LogInformation($"准备打印 PDF 文件: {request.FilePath} 到打印机: {printerName}");
+                    _logger.LogInformation($"准备打印 PDF 文件: {request.FilePath} -> {printerName}, 份数: {request.Copies}");
                     await PrintPdfAsync(request.FilePath, printerName, request.Copies, request.PaperSize, request.Orientation);
-                    _logger.LogInformation($"PDF 文件已发送到打印机 '{printerName}'，正在后台打印");
+                    _logger.LogInformation($"PDF 文件已发送到打印机 '{printerName}'");
                 }
                 else if (fileExtension == ".txt")
                 {
-                    // 使用 PrintDocument 执行打印
+                    _logger.LogInformation($"准备打印文本文件: {request.FilePath} -> {printerName}, 份数: {request.Copies}");
                     using (var printDoc = new System.Drawing.Printing.PrintDocument())
                     {
                         printDoc.PrinterSettings.PrinterName = printerName;
@@ -158,23 +158,23 @@ namespace RemotePrintService.Services
                 }
                 else
                 {
-                    // 其他文件类型，使用默认打印程序
+                    _logger.LogInformation($"使用默认程序打印文件: {request.FilePath} -> {printerName}");
                     await PrintWithDefaultProgramAsync(request.FilePath, printerName);
                 }
 
-                _logger.LogInformation($"Print job {jobId} sent to printer {printerName}");
+                _logger.LogInformation($"打印任务 {jobId} 已发送到打印机 {printerName}");
 
                 return new PrintResponse
                 {
                     Success = true,
-                    Message = $"打印任务已发送，浏览器将自动打印到 '{printerName}'",
+                    Message = $"打印任务已发送到 '{printerName}'",
                     JobId = jobId,
                     Timestamp = DateTime.UtcNow
                 };
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error during print operation");
+                _logger.LogError(ex, "打印操作失败");
                 return new PrintResponse
                 {
                     Success = false,
@@ -184,7 +184,7 @@ namespace RemotePrintService.Services
         }
 
         /// <summary>
-        /// 检查打印机是否在线
+        /// 检查指定打印机是否在线
         /// </summary>
         public async Task<bool> IsPrinterOnlineAsync(string printerName)
         {
@@ -197,19 +197,18 @@ namespace RemotePrintService.Services
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, $"检查打印机 {printerName} 状态时出错");
+                _logger.LogWarning(ex, $"检查打印机状态时发生错误: {printerName}");
                 return false;
             }
         }
 
         /// <summary>
-        /// 获取打印队列中的任务数
+        /// 获取指定打印机的打印队列中的任务数
         /// </summary>
         public async Task<int> GetPrintQueueCountAsync(string printerName)
         {
             try
             {
-                // 使用 Windows 命令行获取队列信息（更兼容）
                 var processInfo = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "wmic",
@@ -224,28 +223,29 @@ namespace RemotePrintService.Services
                     if (process != null)
                     {
                         await process.WaitForExitAsync();
-                        // 简单实现，返回 0
                         return 0;
                     }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, $"Error getting queue count for printer: {printerName}");
+                // 使用 Spectre.Console 显示警告信息
+                AnsiConsole.MarkupLine($"[yellow]获取打印队列计数时发生错误[/]: {printerName} - {ex.Message}");
+                _logger.LogWarning(ex, $"获取打印队列计数时发生错误: {printerName}");
             }
 
             return await Task.FromResult(0);
         }
 
         /// <summary>
-        /// 打印 PDF 文件 - 使用 Adobe Acrobat 直接打印
+        /// 打印 PDF 文件
         /// </summary>
         private async Task PrintPdfAsync(string filePath, string printerName, int copies, string? paperSize = null, string? orientation = null)
         {
             try
             {
-                _logger.LogInformation($"PDF 打印开始: {filePath} -> {printerName}, 份数: {copies}, 纸张: {paperSize}, 方向: {orientation}");
-                
+                _logger.LogInformation($"开始打印 PDF 文件: {filePath} -> {printerName}, 份数: {copies}");
+
                 if (!System.IO.File.Exists(filePath))
                     throw new FileNotFoundException($"文件不存在: {filePath}");
 
@@ -255,15 +255,12 @@ namespace RemotePrintService.Services
                 if (!PrinterSettings.InstalledPrinters.Contains(printerName))
                     throw new InvalidOperationException($"打印机不存在: {printerName}");
 
-                // 获取 Adobe Acrobat 路径配置
                 string adobeAcrobatPath = _configuration["PdfPrint:AdobeAcrobatPath"] 
                     ?? @"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe";
 
-                // 检查 Adobe Acrobat 是否存在
                 if (!System.IO.File.Exists(adobeAcrobatPath))
                 {
                     _logger.LogWarning($"Adobe Acrobat 未找到: {adobeAcrobatPath}，尝试使用默认路径");
-                    // 尝试常见的 Adobe Acrobat 安装路径
                     string[] commonPaths = {
                         @"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
                         @"C:\Program Files (x86)\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
@@ -280,31 +277,22 @@ namespace RemotePrintService.Services
                         }
                     }
 
-                    // 如果仍然找不到 Adobe Acrobat
                     if (!System.IO.File.Exists(adobeAcrobatPath))
                     {
                         throw new InvalidOperationException($"未找到 Adobe Acrobat: {adobeAcrobatPath}");
                     }
                 }
 
-                // 如果指定了纸张大小或方向，记录相关信息
                 if (!string.IsNullOrEmpty(paperSize) || !string.IsNullOrEmpty(orientation))
                 {
                     _logger.LogInformation($"请求的打印参数: 纸张={paperSize}, 方向={orientation}");
                     
-                    // 注意：由于 Adobe Acrobat 命令行限制，我们无法直接通过命令行参数设置纸张大小和方向
-                    // 用户需要预先在打印机设置中配置好这些参数，或者使用 configure_printer_orientation.ps1 脚本进行设置
-                    
-                    // 如果请求横向打印，记录提醒信息
                     if (!string.IsNullOrEmpty(orientation) && orientation.ToLower() == "landscape")
                     {
-                        _logger.LogWarning("请求横向打印: 请确保打印机已设置为横向模式，否则可能不会按预期打印");
-                        _logger.LogWarning("建议使用 configure_printer_orientation.ps1 脚本或手动设置打印机方向");
+                        _logger.LogWarning("请求横向打印: 请确保打印机已设置为横向模式");
                     }
                 }
 
-                // 构建 Adobe Acrobat 打印命令
-                // 使用 Adobe Acrobat 的命令行参数进行静默打印
                 var printProcess = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = adobeAcrobatPath,
@@ -322,14 +310,13 @@ namespace RemotePrintService.Services
                     {
                         _logger.LogInformation($"Adobe Acrobat 打印进程已启动，PID: {process.Id}");
                         
-                        // 等待打印进程完成（最多 60 秒，PDF 打印可能需要更多时间）
-                        bool exited = process.WaitForExit(20000);
+                        // 增加等待时间到30秒，确保 Adobe Acrobat 有足够时间读取文件
+                        bool exited = process.WaitForExit(30000);
                         
                         if (exited)
                         {
                             _logger.LogInformation($"Adobe Acrobat 打印进程已退出，退出代码: {process.ExitCode}");
                             
-                            // 检查退出代码
                             if (process.ExitCode != 0)
                             {
                                 _logger.LogWarning($"Adobe Acrobat 打印进程返回非零退出代码: {process.ExitCode}");
@@ -337,7 +324,7 @@ namespace RemotePrintService.Services
                         }
                         else
                         {
-                            _logger.LogWarning($"Adobe Acrobat 打印进程未在 60 秒内退出，可能仍在后台运行");
+                            _logger.LogWarning($"Adobe Acrobat 打印进程未在 30 秒内退出，将继续执行");
                         }
                     }
                     else
@@ -347,7 +334,7 @@ namespace RemotePrintService.Services
                     }
                 }
 
-                _logger.LogInformation($"PDF 文件已成功通过 Adobe Acrobat 发送到打印机 '{printerName}'");
+                _logger.LogInformation($"PDF 文件已成功发送到打印机 '{printerName}'");
                 await Task.CompletedTask;
             }
             catch (Exception ex)
@@ -364,7 +351,7 @@ namespace RemotePrintService.Services
         {
             try
             {
-                _logger.LogInformation($"打印文本文件开始: {filePath} -> {printerName}, 份数: {copies}");
+                _logger.LogInformation($"开始打印文本文件: {filePath} -> {printerName}, 份数: {copies}");
                 
                 var content = await File.ReadAllTextAsync(filePath);
 
@@ -391,32 +378,35 @@ namespace RemotePrintService.Services
                         }
 
                         e.HasMorePages = currentLine < lines.Length;
-                        _logger.LogInformation($"打印页面，当前行: {currentLine}/{lines.Length}");
+                        // 减少过于频繁的日志输出
+                        if (currentLine % 50 == 0 || currentLine >= lines.Length) // 每50行或最后一页输出一次
+                        {
+                            _logger.LogInformation($"打印页面，当前行: {currentLine}/{lines.Length}");
+                        }
                     };
 
                     try
                     {
                         printDoc.Print();
                         _logger.LogInformation($"文本文件打印完成: {filePath}");
-                        await Task.Delay(1000); // 给打印机处理时间
+                        // 移除不必要的延迟，让打印操作异步进行
                     }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "PrintDocument.Print() 执行失败，尝试使用命令行方式");
-                        // 尝试使用 notepad 打印
                         await PrintUsingNotepadAsync(filePath, printerName, copies);
                     }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error printing text file");
+                _logger.LogError(ex, "打印文本文件时发生错误");
                 throw;
             }
         }
 
         /// <summary>
-        /// 使用 Notepad 和 print.exe 打印文本文件
+        /// 使用 Notepad 打印文本文件
         /// </summary>
         private async Task PrintUsingNotepadAsync(string filePath, string printerName, int copies)
         {
@@ -442,7 +432,8 @@ namespace RemotePrintService.Services
                     }
                 }
 
-                await Task.Delay(1000);
+                // 减少延迟时间
+                await Task.Delay(500);
             }
             catch (Exception ex)
             {
@@ -454,41 +445,40 @@ namespace RemotePrintService.Services
         /// <summary>
         /// 使用系统默认方法打印
         /// </summary>
-        private async Task PrintUsingWindowsDefaultAsync(string filePath, string printerName, int copies)
+        private Task PrintUsingWindowsDefaultAsync(string filePath, string printerName, int copies)
         {
             try
             {
-                _logger.LogInformation($"Using Windows default print method for: {filePath}");
+                _logger.LogInformation($"使用 Windows 默认打印方法: {filePath}");
                 
-                // 不再尝试直接启动文件，一旅失败则报告
                 throw new InvalidOperationException(
-                    $"Failed to print file: {filePath}\n\n" +
-                    $"Please ensure:\n" +
-                    $"1. The file format is supported by your system\n" +
-                    $"2. For PDF: Install Adobe Reader or configure default PDF viewer\n" +
-                    $"3. The printer '{printerName}' is properly installed\n" +
-                    $"4. Try right-clicking the file and selecting 'Print'");
+                    $"打印文件失败: {filePath}\n\n" +
+                    $"请确保:\n" +
+                    $"1. 文件格式受系统支持\n" +
+                    $"2. 对于 PDF 文件: 安装 Adobe Reader 或配置默认 PDF 查看器\n" +
+                    $"3. 打印机 '{printerName}' 已正确安装\n" +
+                    $"4. 尝试右键点击文件并选择 '打印'");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error in PrintUsingWindowsDefaultAsync");
+                _logger.LogError(ex, "使用 Windows 默认打印方法时发生错误");
                 throw;
             }
         }
 
         /// <summary>
-        /// 使用默认程序打印（过旧版本）
+        /// 使用默认程序打印
         /// </summary>
-        private async Task PrintWithDefaultProgramAsync(string filePath, string printerName)
+        private Task PrintWithDefaultProgramAsync(string filePath, string printerName)
         {
             try
             {
-                // 这个方法已经不批推使用，应为PrintUsingWindowsDefaultAsync
-                await PrintUsingWindowsDefaultAsync(filePath, printerName, 1);
+                return PrintUsingWindowsDefaultAsync(filePath, printerName, 1);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error printing with default program");
+                AnsiConsole.MarkupLine($"[red]使用默认程序打印时发生错误[/]: {ex.Message}");
+                _logger.LogError(ex, "使用默认程序打印时发生错误");
                 throw;
             }
         }
@@ -496,17 +486,41 @@ namespace RemotePrintService.Services
         /// <summary>
         /// 获取默认打印机名称
         /// </summary>
-        private string GetDefaultPrinterName()
+        private async Task<string> GetDefaultPrinterName()
         {
             try
             {
                 var settings = new PrinterSettings();
-                return settings.PrinterName ?? (PrinterSettings.InstalledPrinters.Count > 0 ? PrinterSettings.InstalledPrinters[0] : string.Empty);
+                return await Task.FromResult(settings.PrinterName ?? (PrinterSettings.InstalledPrinters.Count > 0 ? PrinterSettings.InstalledPrinters[0] : string.Empty));
             }
             catch
             {
-                // 如果不能获取默认打印机，则返回第一个打印机
-                return PrinterSettings.InstalledPrinters.Count > 0 ? PrinterSettings.InstalledPrinters[0] : string.Empty;
+                return await Task.FromResult(PrinterSettings.InstalledPrinters.Count > 0 ? PrinterSettings.InstalledPrinters[0] : string.Empty);
+            }
+        }
+
+        /// <summary>
+        /// 检查文件是否被锁定
+        /// </summary>
+        private bool IsFileLocked(string filePath)
+        {
+            try
+            {
+                using (FileStream stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    stream.Close();
+                }
+                return false;
+            }
+            catch (IOException)
+            {
+                // 文件被锁定
+                return true;
+            }
+            catch (Exception)
+            {
+                // 其他异常，假设文件被锁定以确保安全
+                return true;
             }
         }
     }

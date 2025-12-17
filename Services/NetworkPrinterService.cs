@@ -2,11 +2,12 @@ using System.Diagnostics;
 using System.Net.Sockets;
 using System.Text;
 using RemotePrintService.Models;
+using Spectre.Console;
 
 namespace RemotePrintService.Services
 {
     /// <summary>
-    /// 网络打印机服务实现
+    /// 网络打印机服务实现类
     /// </summary>
     public class NetworkPrinterService : IPrinterService
     {
@@ -20,7 +21,7 @@ namespace RemotePrintService.Services
         }
 
         /// <summary>
-        /// 获取所有可用的打印机列表
+        /// 获取所有可用的网络打印机列表
         /// </summary>
         public async Task<List<PrinterInfo>> GetAvailablePrintersAsync()
         {
@@ -28,7 +29,6 @@ namespace RemotePrintService.Services
             
             try
             {
-                // 从配置文件读取网络打印机列表
                 var printersConfig = _configuration.GetSection("Printers:NetworkPrinters");
                 
                 if (printersConfig.Exists())
@@ -48,22 +48,28 @@ namespace RemotePrintService.Services
                         if (!string.IsNullOrEmpty(printer.Name) && !string.IsNullOrEmpty(printer.IpAddress))
                         {
                             printers.Add(printer);
+                            // 使用 Spectre.Console 显示发现的打印机
+                            AnsiConsole.MarkupLine($"[green]发现网络打印机[/]: [blue]{printer.Name}[/] ([yellow]{printer.IpAddress}:{printer.Port}[/])");
                         }
                     }
                 }
 
-                _logger.LogInformation($"Found {printers.Count} network printers");
+                // 使用 Spectre.Console 显示统计信息
+                AnsiConsole.MarkupLine($"[bold blue]共找到 {printers.Count} 个网络打印机[/]");
+                _logger.LogInformation($"共找到 {printers.Count} 个网络打印机");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting available printers");
+                // 使用 Spectre.Console 显示错误信息
+                AnsiConsole.MarkupLine($"[red]获取可用打印机时发生错误: {ex.Message}[/]");
+                _logger.LogError(ex, "获取可用打印机时发生错误");
             }
 
             return printers;
         }
 
         /// <summary>
-        /// 获取指定打印机的信息
+        /// 获取指定网络打印机的详细信息
         /// </summary>
         public async Task<PrinterInfo?> GetPrinterInfoAsync(string printerName)
         {
@@ -74,21 +80,24 @@ namespace RemotePrintService.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"Error getting printer info for {printerName}");
+                // 使用 Spectre.Console 显示错误信息
+                AnsiConsole.MarkupLine($"[red]获取打印机信息时发生错误[/]: {printerName} - {ex.Message}");
+                _logger.LogError(ex, $"获取打印机信息时发生错误: {printerName}");
                 return null;
             }
         }
 
         /// <summary>
-        /// 执行打印操作
+        /// 执行网络打印机打印操作
         /// </summary>
         public async Task<PrintResponse> PrintAsync(PrintRequest request)
         {
             try
             {
-                // 验证文件是否存在
                 if (!File.Exists(request.FilePath))
                 {
+                    // 使用 Spectre.Console 显示错误信息
+                    AnsiConsole.MarkupLine($"[red]文件不存在[/]: {request.FilePath}");
                     return new PrintResponse
                     {
                         Success = false,
@@ -96,7 +105,6 @@ namespace RemotePrintService.Services
                     };
                 }
 
-                // 获取目标打印机
                 string printerName = request.PrinterName ?? _configuration["Printers:DefaultPrinter"] ?? string.Empty;
                 
                 if (string.IsNullOrEmpty(printerName))
@@ -106,6 +114,8 @@ namespace RemotePrintService.Services
                     
                     if (defaultPrinter == null)
                     {
+                        // 使用 Spectre.Console 显示错误信息
+                        AnsiConsole.MarkupLine($"[red]未找到可用的打印机[/]");
                         return new PrintResponse
                         {
                             Success = false,
@@ -119,6 +129,8 @@ namespace RemotePrintService.Services
                 var printerInfo = await GetPrinterInfoAsync(printerName);
                 if (printerInfo == null)
                 {
+                    // 使用 Spectre.Console 显示错误信息
+                    AnsiConsole.MarkupLine($"[red]打印机不存在[/]: {printerName}");
                     return new PrintResponse
                     {
                         Success = false,
@@ -126,9 +138,10 @@ namespace RemotePrintService.Services
                     };
                 }
 
-                // 检查打印机是否在线
                 if (!printerInfo.IsOnline)
                 {
+                    // 使用 Spectre.Console 显示错误信息
+                    AnsiConsole.MarkupLine($"[red]打印机离线[/]: {printerName}");
                     return new PrintResponse
                     {
                         Success = false,
@@ -136,13 +149,17 @@ namespace RemotePrintService.Services
                     };
                 }
 
-                // 读取文件内容
+                // 使用 Spectre.Console 显示进度信息
+                AnsiConsole.MarkupLine($"[blue]读取文件内容[/]: [yellow]{request.FilePath}[/]");
                 byte[] fileContent = await File.ReadAllBytesAsync(request.FilePath);
 
-                // 建立网络连接并发送打印数据
+                // 使用 Spectre.Console 显示进度信息
+                AnsiConsole.MarkupLine($"[blue]发送打印任务到网络打印机[/]: [yellow]{printerName}[/] ([cyan]{printerInfo.IpAddress}:{printerInfo.Port}[/])");
                 string jobId = await SendPrintJobAsync(printerInfo, fileContent, request);
 
-                _logger.LogInformation($"Print job {jobId} sent to printer {printerName}");
+                // 使用 Spectre.Console 显示成功信息
+                AnsiConsole.MarkupLine($"[green]打印任务 {jobId} 已发送到打印机[/] [yellow]{printerName}[/]");
+                _logger.LogInformation($"打印任务 {jobId} 已发送到打印机 {printerName}");
 
                 return new PrintResponse
                 {
@@ -154,7 +171,9 @@ namespace RemotePrintService.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error during print operation");
+                // 使用 Spectre.Console 显示错误信息
+                AnsiConsole.MarkupLine($"[red]打印操作失败: {ex.Message}[/]");
+                _logger.LogError(ex, "打印操作失败");
                 return new PrintResponse
                 {
                     Success = false,
@@ -164,7 +183,7 @@ namespace RemotePrintService.Services
         }
 
         /// <summary>
-        /// 检查打印机是否在线
+        /// 检查指定网络打印机是否在线
         /// </summary>
         public async Task<bool> IsPrinterOnlineAsync(string printerName)
         {
@@ -183,7 +202,7 @@ namespace RemotePrintService.Services
         }
 
         /// <summary>
-        /// 获取打印队列中的任务数
+        /// 获取指定网络打印机的打印队列中的任务数
         /// </summary>
         public async Task<int> GetPrintQueueCountAsync(string printerName)
         {
@@ -193,14 +212,13 @@ namespace RemotePrintService.Services
                 if (printerInfo == null)
                     return 0;
 
-                // 尝试连接打印机，连接成功说明有任务或打印机响应
                 using (var client = new TcpClient())
                 {
                     client.ReceiveTimeout = 3000;
                     client.SendTimeout = 3000;
 
                     await client.ConnectAsync(printerInfo.IpAddress, printerInfo.Port);
-                    return 1; // 简单实现，实际可返回真实队列数
+                    return 1;
                 }
             }
             catch
@@ -210,7 +228,7 @@ namespace RemotePrintService.Services
         }
 
         /// <summary>
-        /// 向打印机发送打印任务
+        /// 向网络打印机发送打印任务
         /// </summary>
         private async Task<string> SendPrintJobAsync(PrinterInfo printerInfo, byte[] fileContent, PrintRequest request)
         {
@@ -223,16 +241,16 @@ namespace RemotePrintService.Services
                     client.SendTimeout = 5000;
                     client.ReceiveTimeout = 5000;
 
-                    // 连接到打印机
+                    // 使用 Spectre.Console 显示连接信息
+                    AnsiConsole.MarkupLine($"[blue]连接到网络打印机[/]: [yellow]{printerInfo.IpAddress}:{printerInfo.Port}[/]");
                     await client.ConnectAsync(printerInfo.IpAddress, printerInfo.Port);
 
                     using (var stream = client.GetStream())
                     {
-                        // 构建打印机命令（ESC/POS格式示例）
                         var commands = new List<byte>();
 
                         // 初始化打印机
-                        commands.AddRange(new byte[] { 0x1B, 0x40 }); // ESC @
+                        commands.AddRange(new byte[] { 0x1B, 0x40 });
 
                         // 添加打印份数
                         for (int i = 0; i < request.Copies; i++)
@@ -241,19 +259,23 @@ namespace RemotePrintService.Services
                         }
 
                         // 打印并进纸
-                        commands.AddRange(new byte[] { 0x1B, 0x64, 0x0A }); // ESC d (n)
+                        commands.AddRange(new byte[] { 0x1B, 0x64, 0x0A });
 
-                        // 发送数据
+                        // 使用 Spectre.Console 显示发送信息
+                        AnsiConsole.MarkupLine($"[blue]发送数据到打印机[/]: [cyan]{commands.Count}[/] 字节");
                         await stream.WriteAsync(commands.ToArray(), 0, commands.Count);
                         await stream.FlushAsync();
 
-                        _logger.LogInformation($"Sent {commands.Count} bytes to printer {printerInfo.Name}");
+                        AnsiConsole.MarkupLine($"[green]已发送 {commands.Count} 字节到打印机[/] [yellow]{printerInfo.Name}[/]");
+                        _logger.LogInformation($"已发送 {commands.Count} 字节到打印机 {printerInfo.Name}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"Error sending print job to printer {printerInfo.Name}");
+                // 使用 Spectre.Console 显示错误信息
+                AnsiConsole.MarkupLine($"[red]发送打印任务到打印机时发生错误[/]: {printerInfo.Name} - {ex.Message}");
+                _logger.LogError(ex, $"发送打印任务到打印机时发生错误: {printerInfo.Name}");
                 throw;
             }
 
@@ -261,7 +283,7 @@ namespace RemotePrintService.Services
         }
 
         /// <summary>
-        /// 检查打印机IP是否在线
+        /// 检查网络打印机IP是否在线
         /// </summary>
         private async Task<bool> IsPrinterOnlineAsync(string ipAddress, int port)
         {
@@ -272,12 +294,16 @@ namespace RemotePrintService.Services
                     client.SendTimeout = 2000;
                     client.ReceiveTimeout = 2000;
 
+                    // 使用 Spectre.Console 显示连接测试信息
+                    AnsiConsole.MarkupLine($"[blue]测试打印机连接[/]: [yellow]{ipAddress}:{port}[/]");
                     await client.ConnectAsync(ipAddress, port);
+                    AnsiConsole.MarkupLine($"[green]打印机在线[/]: [yellow]{ipAddress}:{port}[/]");
                     return true;
                 }
             }
             catch
             {
+                AnsiConsole.MarkupLine($"[red]打印机离线[/]: [yellow]{ipAddress}:{port}[/]");
                 return false;
             }
         }
