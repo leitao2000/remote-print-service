@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # RemotePrintService 远程打印服务
 
 ## 项目概述
@@ -30,7 +29,8 @@ RemotePrintService 是一个基于 ASP.NET Core 的远程打印服务，支持�
 ```
 RemotePrintService/
 ├── Controllers/           # 控制器层
-│   └── PrinterController.cs    # 打印机相关API控制器
+│   ├── PrinterController.cs    # 打印机相关API控制器
+│   └── LabelController.cs      # 标签生成和打印API控制器
 ├── Models/                # 数据模型
 │   ├── PrintRequest.cs         # 打印请求模型
 │   ├── PrintResponse.cs        # 打印响应模型
@@ -85,27 +85,29 @@ RemotePrintService/
 
 ## API 接口说明
 
-### 获取打印机列表
+### 打印机管理接口
+
+#### 获取打印机列表
 ```
 GET /api/printer/list
 ```
 
-### 获取打印机信息
+#### 获取打印机信息
 ```
 GET /api/printer/{printerName}
 ```
 
-### 检查打印机状态
+#### 检查打印机状态
 ```
 GET /api/printer/{printerName}/status
 ```
 
-### 获取打印队列任务数
+#### 获取打印队列任务数
 ```
 GET /api/printer/{printerName}/queue-count
 ```
 
-### 执行打印操作
+#### 执行打印操作
 ```
 POST /api/printer/print
 Content-Type: application/json
@@ -115,11 +117,12 @@ Content-Type: application/json
   "printerName": "打印机名称（可选）",
   "copies": 1,
   "doubleSided": false,
-  "paperSize": "A4"
+  "paperSize": "A4",
+  "orientation": "Portrait"
 }
 ```
 
-### 上传文件并打印
+#### 上传文件并打印
 ```
 POST /api/printer/print-file
 Content-Type: multipart/form-data
@@ -129,6 +132,29 @@ Content-Type: multipart/form-data
 打印份数: copies（可选）
 双面打印: doubleSided（可选）
 纸张尺寸: paperSize（可选）
+```
+
+### 标签生成接口
+
+#### 生成标签PDF
+```
+POST /api/label/generate-label
+Content-Type: application/json
+
+{
+  "number": 123
+}
+```
+
+#### 生成标签并打印
+```
+POST /api/label/print-label
+Content-Type: application/json
+
+{
+  "number": 123,
+  "printerName": "打印机名称（可选）"
+}
 ```
 
 ## 使用说明
@@ -174,44 +200,3 @@ API 文档地址: http://localhost:5035/scalar/v2-beta
 ## 错误处理
 
 服务具有完善的错误处理机制，对于各种异常情况都会返回相应的错误信息和 HTTP 状态码。
-=======
-# RemotePrintService
-
-#### 介绍
-{**以下是 Gitee 平台说明，您可以替换此简介**
-Gitee 是 OSCHINA 推出的基于 Git 的代码托管平台（同时支持 SVN）。专为开发者提供稳定、高效、安全的云端软件开发协作平台
-无论是个人、团队、或是企业，都能够用 Gitee 实现代码托管、项目管理、协作开发。企业项目请看 [https://gitee.com/enterprises](https://gitee.com/enterprises)}
-
-#### 软件架构
-软件架构说明
-
-
-#### 安装教程
-
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### 使用说明
-
-1.  xxxx
-2.  xxxx
-3.  xxxx
-
-#### 参与贡献
-
-1.  Fork 本仓库
-2.  新建 Feat_xxx 分支
-3.  提交代码
-4.  新建 Pull Request
-
-
-#### 特技
-
-1.  使用 Readme\_XXX.md 来支持不同的语言，例如 Readme\_en.md, Readme\_zh.md
-2.  Gitee 官方博客 [blog.gitee.com](https://blog.gitee.com)
-3.  你可以 [https://gitee.com/explore](https://gitee.com/explore) 这个地址来了解 Gitee 上的优秀开源项目
-4.  [GVP](https://gitee.com/gvp) 全称是 Gitee 最有价值开源项目，是综合评定出的优秀开源项目
-5.  Gitee 官方提供的使用手册 [https://gitee.com/help](https://gitee.com/help)
-6.  Gitee 封面人物是一档用来展示 Gitee 会员风采的栏目 [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
->>>>>>> 18e0851b8d21f15a72e1d8ea85548258ade0a15d
