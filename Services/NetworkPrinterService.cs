@@ -269,7 +269,7 @@ namespace RemotePrintService.Services
         }
 
         /// <summary>
-        /// 获取指定网络打印机的打印队列中的任务数
+        /// 获取指定网络打印机的打印队列中的任务数（优化版本）
         /// </summary>
         public async Task<int> GetPrintQueueCountAsync(string printerName)
         {
@@ -281,11 +281,15 @@ namespace RemotePrintService.Services
 
                 using (var client = new TcpClient())
                 {
-                    client.ReceiveTimeout = 3000;
-                    client.SendTimeout = 3000;
+                    client.NoDelay = true; // 优化 TCP 性能
+                    client.ReceiveTimeout = 2000; // 减少超时时间
+                    client.SendTimeout = 2000;
 
-                    await client.ConnectAsync(printerInfo.IpAddress, printerInfo.Port);
-                    return 1;
+                    using (var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(2000)))
+                    {
+                        await client.ConnectAsync(printerInfo.IpAddress, printerInfo.Port).WaitAsync(cts.Token);
+                        return 1;
+                    }
                 }
             }
             catch
