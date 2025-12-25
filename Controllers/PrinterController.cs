@@ -100,6 +100,111 @@ namespace RemotePrintService.Controllers
         }
 
         /// <summary>
+        /// 诊断服务器环境（检查Adobe Acrobat、打印机等）
+        /// </summary>
+        [HttpGet("diagnostics")]
+        [EndpointDescription("诊断服务器环境，检查Adobe Acrobat、打印机等配置")]
+        public IActionResult GetDiagnostics()
+        {
+            try
+            {
+                var diagnostics = new
+                {
+                    timestamp = DateTime.UtcNow,
+                    adobeAcrobat = CheckAdobeAcrobat(),
+                    printers = GetPrintersInfo(),
+                    tempDirectory = Path.GetTempPath(),
+                    currentDirectory = Directory.GetCurrentDirectory()
+                };
+
+                _logger.LogInformation("诊断信息已生成");
+                return Ok(new { success = true, data = diagnostics });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "生成诊断信息时发生错误");
+                return StatusCode(500, new { success = false, message = ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// 检查Adobe Acrobat
+        /// </summary>
+        private object CheckAdobeAcrobat()
+        {
+            var config = HttpContext.RequestServices.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>();
+            string configuredPath = config["PdfPrint:AdobeAcrobatPath"] 
+                ?? @"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe";
+
+            var paths = new[]
+            {
+                configuredPath,
+                @"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
+                @"C:\Program Files (x86)\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
+                @"C:\Program Files\Adobe\Acrobat Reader DC\Acrobat\Acrobat.exe",
+                @"C:\Program Files (x86)\Adobe\Acrobat Reader DC\Acrobat\Acrobat.exe",
+                @"C:\Program Files\Adobe\Acrobat\Acrobat.exe",
+                @"C:\Program Files (x86)\Adobe\Acrobat\Acrobat.exe"
+            };
+
+            var foundPaths = new List<object>();
+            foreach (var path in paths)
+            {
+                bool exists = System.IO.File.Exists(path);
+                foundPaths.Add(new { path, exists });
+            }
+
+            return new
+            {
+                configuredPath,
+                foundPaths,
+                installed = foundPaths.Any(p => ((dynamic)p).exists)
+            };
+        }
+
+        /// <summary>
+        /// 获取打印机信息
+        /// </summary>
+        private object GetPrintersInfo()
+        {
+            try
+            {
+                var printers = new List<object>();
+                foreach (string printerName in System.Drawing.Printing.PrinterSettings.InstalledPrinters)
+                {
+                    try
+                    {
+                        var settings = new System.Drawing.Printing.PrinterSettings { PrinterName = printerName };
+                        printers.Add(new
+                        {
+                            name = printerName,
+                            isValid = settings.IsValid,
+                            isDefault = settings.IsDefaultPrinter
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        printers.Add(new
+                        {
+                            name = printerName,
+                            error = ex.Message
+                        });
+                    }
+                }
+
+                return new
+                {
+                    count = printers.Count,
+                    printers
+                };
+            }
+            catch (Exception ex)
+            {
+                return new { error = ex.Message };
+            }
+        }
+
+        /// <summary>
         /// 获取打印队列中的任务数
         /// </summary>
         [HttpGet("{printerName}/queue-count")]
@@ -231,10 +336,22 @@ namespace RemotePrintService.Controllers
 
                 var result = await _printerService.PrintAsync(printRequest);
 
-                // 注册文件到清理服务，在打印完成后自动删除
-                // 这样确保 Adobe Acrobat 有足够时间打开和打印文件
-                if (result.Success && !string.IsNullOrEmpty(result.JobId))
+                // 检查是否立即打印
+                var immediatePrint = HttpContext.RequestServices.GetRequiredService<IConfiguration>().GetValue<bool>("PrintSettings:ImmediatePrint", false);
+                
+                if (immediatePrint && result.Success)
                 {
+                    // 立即打印模式下，如果打印成功，立即清理文件
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(2000); // 等待2秒后尝试删除
+                        PrintFileCleanupService.CleanupFileNow(tempPath);
+                    });
+                    _logger.LogDebug($"立即打印模式：已安排临时文件删除: {tempPath}");
+                }
+                else if (result.Success && !string.IsNullOrEmpty(result.JobId))
+                {
+                    // 后台打印模式下，注册文件到清理服务，在打印完成后自动删除
                     PrintFileCleanupService.RegisterFileForCleanup(tempPath, result.JobId, _logger);
                     _logger.LogDebug($"已注册临时文件等待打印完成后清理: {tempPath} (任务ID: {result.JobId})");
                 }

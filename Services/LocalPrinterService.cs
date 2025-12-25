@@ -201,43 +201,154 @@ namespace RemotePrintService.Services
 
                 _logger.LogInformation($"开始打印: 文件={request.FilePath}, 打印机={printerName}, 份数={request.Copies}, 格式={fileExtension}");
 
-                // 6. 根据文件类型执行打印（优化为后台异步执行，立即返回响应）
-                _ = Task.Run(async () =>
+                // 检查配置是否立即打印
+                var immediatePrint = _configuration.GetValue<bool>("PrintSettings:ImmediatePrint", false);
+
+                if (immediatePrint)
                 {
+                    // 立即执行打印，不使用后台任务
                     try
                     {
+                        _logger.LogInformation($"立即打印任务 {jobId} 开始执行: 文件={request.FilePath}, 打印机={printerName}");
+                        
                         if (fileExtension == ".pdf")
                         {
                             await PrintPdfAsync(request.FilePath, printerName, request.Copies, request.PaperSize, request.Orientation);
-                            _logger.LogInformation($"后台PDF打印任务 {jobId} 已成功发送到打印机 '{printerName}'");
+                            _logger.LogInformation($"PDF打印任务 {jobId} 已成功发送到打印机 '{printerName}'");
                         }
                         else if (fileExtension == ".txt")
                         {
                             await PrintTextFileAsync(request.FilePath, printerName, request.Copies);
-                            _logger.LogInformation($"后台文本打印任务 {jobId} 已成功发送到打印机 '{printerName}'");
+                            _logger.LogInformation($"文本打印任务 {jobId} 已成功发送到打印机 '{printerName}'");
                         }
                         else
                         {
                             _logger.LogWarning($"不支持的文件格式: {fileExtension}，尝试使用默认程序打印");
                             await PrintWithDefaultProgramAsync(request.FilePath, printerName);
                         }
+
+                        // 打印完成后，标记文件可以删除
+                        if (request.FilePath.StartsWith(Path.GetTempPath()))
+                        {
+                            PrintFileCleanupService.MarkFileReadyForCleanup(request.FilePath, delayMs: 3000, _logger);
+                        }
+
+                        _logger.LogInformation($"打印任务 {jobId} 已完成");
+
+                        return new PrintResponse
+                        {
+                            Success = true,
+                            Message = $"打印任务已完成: '{printerName}'",
+                            JobId = jobId,
+                            Timestamp = DateTime.UtcNow
+                        };
+                    }
+                    catch (FileNotFoundException ex)
+                    {
+                        _logger.LogError(ex, $"打印任务 {jobId} 失败: 文件不存在 - {ex.FileName}");
+                        return new PrintResponse
+                        {
+                            Success = false,
+                            Message = $"文件不存在: {ex.FileName}",
+                            JobId = jobId,
+                            ErrorCode = "FILE_NOT_FOUND"
+                        };
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        _logger.LogError(ex, $"打印任务 {jobId} 失败: 操作无效 - {ex.Message}");
+                        return new PrintResponse
+                        {
+                            Success = false,
+                            Message = $"操作无效: {ex.Message}",
+                            JobId = jobId,
+                            ErrorCode = "INVALID_OPERATION"
+                        };
+                    }
+                    catch (UnauthorizedAccessException ex)
+                    {
+                        _logger.LogError(ex, $"打印任务 {jobId} 失败: 权限不足 - {ex.Message}");
+                        return new PrintResponse
+                        {
+                            Success = false,
+                            Message = $"权限不足: {ex.Message}",
+                            JobId = jobId,
+                            ErrorCode = "ACCESS_DENIED"
+                        };
                     }
                     catch (Exception printEx)
                     {
-                        _logger.LogError(printEx, $"后台打印任务 {jobId} 执行失败: {printerName}");
+                        _logger.LogError(printEx, $"打印任务 {jobId} 执行失败: 打印机={printerName}, 文件={request.FilePath}, 错误类型={printEx.GetType().Name}, 错误消息={printEx.Message}, 堆栈跟踪={printEx.StackTrace}");
+                        return new PrintResponse
+                        {
+                            Success = false,
+                            Message = $"打印失败: {printEx.Message}",
+                            JobId = jobId,
+                            ErrorCode = "PRINT_ERROR"
+                        };
                     }
-                });
-
-                // 立即返回响应，不等待打印完成
-                _logger.LogInformation($"打印任务 {jobId} 已提交到后台队列，立即返回响应");
-
-                return new PrintResponse
+                }
+                else
                 {
-                    Success = true,
-                    Message = $"打印任务已提交到 '{printerName}'，正在后台处理",
-                    JobId = jobId,
-                    Timestamp = DateTime.UtcNow
-                };
+                    // 6. 根据文件类型执行打印（优化为后台异步执行，立即返回响应）
+                    // 注意：使用Task.Run确保异常不会被吞掉，并记录详细错误
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            _logger.LogInformation($"后台打印任务 {jobId} 开始执行: 文件={request.FilePath}, 打印机={printerName}");
+                            
+                            if (fileExtension == ".pdf")
+                            {
+                                await PrintPdfAsync(request.FilePath, printerName, request.Copies, request.PaperSize, request.Orientation);
+                                _logger.LogInformation($"后台PDF打印任务 {jobId} 已成功发送到打印机 '{printerName}'");
+                            }
+                            else if (fileExtension == ".txt")
+                            {
+                                await PrintTextFileAsync(request.FilePath, printerName, request.Copies);
+                                _logger.LogInformation($"后台文本打印任务 {jobId} 已成功发送到打印机 '{printerName}'");
+                            }
+                            else
+                            {
+                                _logger.LogWarning($"不支持的文件格式: {fileExtension}，尝试使用默认程序打印");
+                                await PrintWithDefaultProgramAsync(request.FilePath, printerName);
+                            }
+                        }
+                        catch (FileNotFoundException ex)
+                        {
+                            _logger.LogError(ex, $"后台打印任务 {jobId} 失败: 文件不存在 - {ex.FileName}");
+                        }
+                        catch (InvalidOperationException ex)
+                        {
+                            _logger.LogError(ex, $"后台打印任务 {jobId} 失败: 操作无效 - {ex.Message}");
+                        }
+                        catch (UnauthorizedAccessException ex)
+                        {
+                            _logger.LogError(ex, $"后台打印任务 {jobId} 失败: 权限不足 - {ex.Message}");
+                        }
+                        catch (Exception printEx)
+                        {
+                            _logger.LogError(printEx, $"后台打印任务 {jobId} 执行失败: 打印机={printerName}, 文件={request.FilePath}, 错误类型={printEx.GetType().Name}, 错误消息={printEx.Message}, 堆栈跟踪={printEx.StackTrace}");
+                        }
+                    }).ContinueWith(task =>
+                    {
+                        if (task.IsFaulted && task.Exception != null)
+                        {
+                            _logger.LogError(task.Exception, $"后台打印任务 {jobId} 发生未处理的异常");
+                        }
+                    }, TaskContinuationOptions.OnlyOnFaulted);
+
+                    // 立即返回响应，不等待打印完成
+                    _logger.LogInformation($"打印任务 {jobId} 已提交到后台队列，立即返回响应");
+
+                    return new PrintResponse
+                    {
+                        Success = true,
+                        Message = $"打印任务已提交到 '{printerName}'，正在后台处理",
+                        JobId = jobId,
+                        Timestamp = DateTime.UtcNow
+                    };
+                }
             }
             catch (Exception ex)
             {
@@ -372,27 +483,42 @@ namespace RemotePrintService.Services
 
                 if (!System.IO.File.Exists(adobeAcrobatPath))
                 {
-                    _logger.LogWarning($"Adobe Acrobat 未找到: {adobeAcrobatPath}，尝试使用默认路径");
+                    _logger.LogWarning($"Adobe Acrobat 未找到配置路径: {adobeAcrobatPath}，尝试使用默认路径");
                     string[] commonPaths = {
                         @"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
                         @"C:\Program Files (x86)\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
                         @"C:\Program Files\Adobe\Acrobat Reader DC\Acrobat\Acrobat.exe",
-                        @"C:\Program Files (x86)\Adobe\Acrobat Reader DC\Acrobat\Acrobat.exe"
+                        @"C:\Program Files (x86)\Adobe\Acrobat Reader DC\Acrobat\Acrobat.exe",
+                        @"C:\Program Files\Adobe\Acrobat\Acrobat.exe",
+                        @"C:\Program Files (x86)\Adobe\Acrobat\Acrobat.exe"
                     };
 
+                    bool found = false;
                     foreach (string path in commonPaths)
                     {
+                        _logger.LogDebug($"检查Adobe Acrobat路径: {path}");
                         if (System.IO.File.Exists(path))
                         {
                             adobeAcrobatPath = path;
+                            found = true;
+                            _logger.LogInformation($"找到Adobe Acrobat: {path}");
                             break;
                         }
                     }
 
-                    if (!System.IO.File.Exists(adobeAcrobatPath))
+                    if (!found)
                     {
-                        throw new InvalidOperationException($"未找到 Adobe Acrobat: {adobeAcrobatPath}");
+                        _logger.LogError($"未找到Adobe Acrobat，已检查以下路径:");
+                        foreach (string path in commonPaths)
+                        {
+                            _logger.LogError($"  - {path}");
+                        }
+                        throw new InvalidOperationException($"未找到 Adobe Acrobat。请确保已安装Adobe Acrobat或Adobe Reader，或通过appsettings.json配置正确的路径。已检查的路径: {string.Join(", ", commonPaths)}");
                     }
+                }
+                else
+                {
+                    _logger.LogInformation($"使用配置的Adobe Acrobat路径: {adobeAcrobatPath}");
                 }
 
                 if (!string.IsNullOrEmpty(paperSize) || !string.IsNullOrEmpty(orientation))
@@ -459,7 +585,23 @@ namespace RemotePrintService.Services
                 _logger.LogInformation($"  工作目录: {fileDirectory}");
                 _logger.LogInformation($"  完整命令: {adobeAcrobatPath} /t \"{escapedFilePath}\" \"{escapedPrinterName}\"");
 
-                var process = System.Diagnostics.Process.Start(printProcess);
+                // 尝试启动进程，并捕获启动失败的情况
+                System.Diagnostics.Process? process = null;
+                try
+                {
+                    process = System.Diagnostics.Process.Start(printProcess);
+                }
+                catch (System.ComponentModel.Win32Exception win32Ex)
+                {
+                    _logger.LogError(win32Ex, $"无法启动Adobe Acrobat进程: 错误代码={win32Ex.NativeErrorCode}, 错误消息={win32Ex.Message}");
+                    throw new InvalidOperationException($"无法启动Adobe Acrobat进程: {win32Ex.Message} (错误代码: {win32Ex.NativeErrorCode})。请检查：1) Adobe Acrobat是否已安装；2) 程序路径是否正确；3) 是否有执行权限", win32Ex);
+                }
+                catch (Exception startEx)
+                {
+                    _logger.LogError(startEx, $"启动Adobe Acrobat进程时发生未知错误: {startEx.GetType().Name}, 消息={startEx.Message}");
+                    throw new InvalidOperationException($"启动Adobe Acrobat进程失败: {startEx.Message}", startEx);
+                }
+                
                 if (process != null)
                 {
                     int processId = process.Id;
@@ -547,8 +689,9 @@ namespace RemotePrintService.Services
                 }
                 else
                 {
-                    _logger.LogError($"无法启动 Adobe Acrobat 打印进程");
-                    throw new InvalidOperationException("无法启动 Adobe Acrobat 打印进程");
+                    _logger.LogError($"无法启动 Adobe Acrobat 打印进程: Process.Start返回null");
+                    _logger.LogError($"可能的原因: 1) Adobe Acrobat未安装; 2) 程序路径错误: {adobeAcrobatPath}; 3) 权限不足; 4) 文件路径无效: {absoluteFilePath}");
+                    throw new InvalidOperationException($"无法启动 Adobe Acrobat 打印进程。请检查：1) Adobe Acrobat是否已安装在 {adobeAcrobatPath}；2) 文件是否存在: {absoluteFilePath}；3) 是否有执行权限");
                 }
 
                 _logger.LogInformation($"PDF 文件已成功发送到打印机 '{printerName}'");

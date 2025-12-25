@@ -218,3 +218,5 @@ return PrintExceptionHandler.HandleException(ex, "打印操作")
 - 💡 如果需要在 class 中使用类似功能，需要手动创建新对象并复制属性
 - 🎯 Record 类型更适合不可变数据模型，推荐用于 DTO、响应模型等
 
+
+

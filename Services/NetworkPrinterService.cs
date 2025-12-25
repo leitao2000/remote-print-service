@@ -246,12 +246,14 @@ namespace RemotePrintService.Services
 
                 _logger.LogInformation($"开始打印: {request.FilePath} -> {printerName} (份数: {request.Copies})");
 
-                // 6. 执行打印任务（优化为后台异步执行，立即返回响应）
                 string jobId = Guid.NewGuid().ToString("N");
                 
-                // 在后台异步执行打印任务，立即返回响应
-                _ = Task.Run(async () =>
+                // 检查配置是否立即打印
+                var immediatePrint = _configuration.GetValue<bool>("PrintSettings:ImmediatePrint", false);
+
+                if (immediatePrint)
                 {
+                    // 立即执行打印，不使用后台任务
                     int localRetryCount = 0;
                     Exception? localLastException = null;
                     
@@ -260,8 +262,16 @@ namespace RemotePrintService.Services
                         try
                         {
                             await SendPrintJobAsyncOptimized(printerInfo, request.FilePath, request);
-                            _logger.LogInformation($"后台打印任务 {jobId} 已成功发送到打印机 {printerName} (重试次数: {localRetryCount})");
-                            return; // 成功完成
+                            _logger.LogInformation($"网络打印任务 {jobId} 已成功发送到打印机 {printerName} (重试次数: {localRetryCount})");
+                            
+                            return new PrintResponse
+                            {
+                                Success = true,
+                                Message = $"打印任务已完成: {printerName}",
+                                JobId = jobId,
+                                Timestamp = DateTime.UtcNow,
+                                RetryCount = localRetryCount
+                            };
                         }
                         catch (Exception ex)
                         {
@@ -271,35 +281,93 @@ namespace RemotePrintService.Services
                             // 判断是否可重试
                             if (localRetryCount > maxRetries || !PrintExceptionHandler.IsRetryable(ex))
                             {
-                                _logger.LogError(ex, $"后台打印任务发送失败 (重试次数: {localRetryCount - 1}): {printerName}");
+                                _logger.LogError(ex, $"网络打印任务发送失败 (重试次数: {localRetryCount - 1}): {printerName}");
                                 break;
                             }
 
                             // 计算重试延迟
                             var delay = PrintExceptionHandler.GetRetryDelay(localRetryCount);
-                            _logger.LogWarning($"后台打印任务发送失败，{delay}ms 后重试 (第 {localRetryCount} 次): {ex.Message}");
+                            _logger.LogWarning($"网络打印任务发送失败，{delay}ms 后重试 (第 {localRetryCount} 次): {ex.Message}");
                             await Task.Delay(delay);
                         }
                     }
                     
-                    // 所有重试都失败，记录错误
+                    // 所有重试都失败，返回错误响应
                     if (localLastException != null)
                     {
-                        _logger.LogError(localLastException, $"后台打印任务 {jobId} 最终失败");
+                        _logger.LogError(localLastException, $"网络打印任务 {jobId} 最终失败");
+                        
+                        var errorResponse = PrintExceptionHandler.HandleException(localLastException, "网络打印操作");
+                        errorResponse.JobId = jobId;
+                        errorResponse.RetryCount = localRetryCount;
+                        return errorResponse;
                     }
-                });
-
-                // 立即返回响应，不等待打印完成
-                _logger.LogInformation($"打印任务 {jobId} 已提交到后台队列，立即返回响应");
-                
-                return new PrintResponse
+                    
+                    // 默认返回失败
+                    return new PrintResponse
+                    {
+                        Success = false,
+                        Message = "打印任务失败",
+                        JobId = jobId,
+                        ErrorCode = "PRINT_ERROR",
+                        RetryCount = localRetryCount
+                    };
+                }
+                else
                 {
-                    Success = true,
-                    Message = $"打印任务已提交至 {printerName}，正在后台处理",
-                    JobId = jobId,
-                    Timestamp = DateTime.UtcNow,
-                    RetryCount = 0
-                };
+                    // 6. 执行打印任务（优化为后台异步执行，立即返回响应）
+                    // 在后台异步执行打印任务，立即返回响应
+                    _ = Task.Run(async () =>
+                    {
+                        int localRetryCount = 0;
+                        Exception? localLastException = null;
+                        
+                        while (localRetryCount <= maxRetries)
+                        {
+                            try
+                            {
+                                await SendPrintJobAsyncOptimized(printerInfo, request.FilePath, request);
+                                _logger.LogInformation($"后台打印任务 {jobId} 已成功发送到打印机 {printerName} (重试次数: {localRetryCount})");
+                                return; // 成功完成
+                            }
+                            catch (Exception ex)
+                            {
+                                localLastException = ex;
+                                localRetryCount++;
+
+                                // 判断是否可重试
+                                if (localRetryCount > maxRetries || !PrintExceptionHandler.IsRetryable(ex))
+                                {
+                                    _logger.LogError(ex, $"后台打印任务发送失败 (重试次数: {localRetryCount - 1}): {printerName}");
+                                    break;
+                                }
+
+                                // 计算重试延迟
+                                var delay = PrintExceptionHandler.GetRetryDelay(localRetryCount);
+                                _logger.LogWarning($"后台打印任务发送失败，{delay}ms 后重试 (第 {localRetryCount} 次): {ex.Message}");
+                                await Task.Delay(delay);
+                            }
+                        }
+                        
+                        // 所有重试都失败，记录错误
+                        if (localLastException != null)
+                        {
+                            _logger.LogError(localLastException, $"后台打印任务 {jobId} 最终失败");
+                        }
+                    });
+
+                    // 立即返回响应，不等待打印完成
+                    _logger.LogInformation($"打印任务 {jobId} 已提交到后台队列，立即返回响应");
+                    
+                    return new PrintResponse
+                    {
+                        Success = true,
+                        Message = $"打印任务已提交至 {printerName}，正在后台处理",
+                        JobId = jobId,
+                        Timestamp = DateTime.UtcNow,
+                        RetryCount = 0
+                    };
+                }
             }
             catch (Exception ex)
             {

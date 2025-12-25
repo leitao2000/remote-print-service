@@ -27,6 +27,13 @@ namespace RemotePrintService
             builder.WebHost.ConfigureKestrel(serverOptions =>
             {
                 serverOptions.ListenAnyIP(5035); // 监听所有网络接口的 5035 端口
+                
+                // 配置请求体限制，解决文件上传超时问题
+                serverOptions.Limits.MaxRequestBodySize = 500 * 1024 * 1024; // 500MB，与文件验证限制一致
+                serverOptions.Limits.MinRequestBodyDataRate = null; // 禁用最小数据速率限制，允许慢速上传
+                serverOptions.Limits.MinResponseDataRate = null; // 禁用最小响应数据速率限制
+                serverOptions.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(2); // 请求头超时时间：2分钟
+                serverOptions.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(2); // Keep-Alive超时时间：2分钟
             });
 
             // 添加控制器服务
