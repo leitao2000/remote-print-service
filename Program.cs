@@ -39,6 +39,25 @@ namespace RemotePrintService
             builder.Services.AddScoped<IPrinterService, LocalPrinterService>();
 
             var app = builder.Build();
+            
+            // 预热打印机系统（解决首次打印失败问题）
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(1000); // 等待服务完全启动
+                    using (var scope = app.Services.CreateScope())
+                    {
+                        var printerService = scope.ServiceProvider.GetRequiredService<IPrinterService>();
+                        _ = await printerService.GetAvailablePrintersAsync();
+                        AnsiConsole.MarkupLine("[green]打印机系统预热完成[/]");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AnsiConsole.MarkupLine($"[yellow]打印机系统预热失败（不影响服务运行）: {ex.Message}[/]");
+                }
+            });
 
             // 启用 OpenAPI 文档（无论什么环境都启用）
             app.MapOpenApi();
@@ -49,8 +68,8 @@ namespace RemotePrintService
             // 配置 Scalar API 文档界面（无论什么环境都启用）
             app.MapScalarApiReference(options =>
             {
-                options.AddDocument("v1", "Production API", "api/v1/openapi.json")
-                       .AddDocument("v2-beta", "Beta API", "api/v2-beta/openapi.json", isDefault: true)
+                options.AddDocument("v1", "Production API", "api/v1/openapi.json",isDefault: true)
+                       .AddDocument("v2-beta", "Beta API", "api/v2-beta/openapi.json")
                        .AddDocument("internal", "Internal API", "internal/openapi.json");
             });
 
@@ -66,7 +85,7 @@ namespace RemotePrintService
             var firstUrl = app.Urls.FirstOrDefault()?.TrimEnd('/') ?? "http://localhost:5035";
             AnsiConsole.MarkupLine($"[yellow]监听地址:[/] {string.Join(", ", app.Urls)}");
             AnsiConsole.WriteLine();
-            AnsiConsole.MarkupLine("[blue]API 文档地址: [/][link]{0}/scalar/v2-beta[/]", firstUrl);
+            AnsiConsole.MarkupLine("[blue]API 文档地址: [/][link]{0}/scalar/v1[/]", firstUrl);
 
             // 启动应用程序
             app.Run();

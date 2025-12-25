@@ -35,5 +35,23 @@ namespace RemotePrintService.Models
         /// 使用UTC时间格式
         /// </summary>
         public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+
+        /// <summary>
+        /// 错误代码
+        /// 用于标识错误类型，便于程序化处理
+        /// </summary>
+        public string? ErrorCode { get; set; }
+
+        /// <summary>
+        /// 错误详细信息
+        /// 包含详细的错误信息，主要用于日志记录和调试
+        /// </summary>
+        public string? ErrorDetails { get; set; }
+
+        /// <summary>
+        /// 重试次数
+        /// 记录操作重试的次数
+        /// </summary>
+        public int RetryCount { get; set; }
     }
 }

@@ -122,7 +122,7 @@ namespace RemotePrintService.Controllers
         }
 
         /// <summary>
-        /// 执行打印操作
+        /// 执行打印操作（带完善的错误处理）
         /// </summary>
         [HttpPost("print")]
         [EndpointDescription("向指定打印机发送打印任务")]
@@ -133,41 +133,46 @@ namespace RemotePrintService.Controllers
             {
                 if (request == null)
                 {
-                    _logger.LogWarning("请求体为NULL，请提供JSON操作体");
-                    return BadRequest(new { success = false, message = "请求体为NULL，请提供JSON操作体" });
+                    _logger.LogWarning("打印请求体为NULL");
+                    return BadRequest(new PrintResponse
+                    {
+                        Success = false,
+                        Message = "请求体不能为空，请提供有效的JSON请求体",
+                        ErrorCode = "INVALID_REQUEST"
+                    });
                 }
 
-                _logger.LogInformation($"接收到打印请求：文件={request.FilePath}, 打印机={request.PrinterName}");
+                _logger.LogInformation($"接收到打印请求：文件={request.FilePath}, 打印机={request.PrinterName ?? "默认"}, 份数={request.Copies}");
 
-                if (string.IsNullOrWhiteSpace(request.FilePath))
-                {
-                    _logger.LogWarning("文件路径不能为空");
-                    return BadRequest(new { success = false, message = "文件路径不能为空" });
-                }
-
-                if (request.Copies < 1 || request.Copies > 100)
-                {
-                    _logger.LogWarning("打印份数必须在1-100之间");
-                    return BadRequest(new { success = false, message = "打印份数必须在1-100之间" });
-                }
-
+                // 调用服务层执行打印（服务层已包含完整的验证和错误处理）
                 var result = await _printerService.PrintAsync(request);
 
                 if (result.Success)
                 {
-                    _logger.LogInformation($"打印成功：{result.JobId}");
+                    _logger.LogInformation($"打印任务提交成功：任务ID={result.JobId}, 重试次数={result.RetryCount}");
                     return Ok(result);
                 }
                 else
                 {
-                    _logger.LogWarning($"打印失败：{result.Message}");
-                    return BadRequest(result);
+                    // 根据错误代码返回适当的HTTP状态码
+                    var statusCode = result.ErrorCode switch
+                    {
+                        "VALIDATION_ERROR" or "INVALID_PRINTER_NAME" or "INVALID_NETWORK_ADDRESS" => 400, // Bad Request
+                        "FILE_NOT_FOUND" or "PRINTER_NOT_FOUND" or "NO_PRINTER_AVAILABLE" => 404, // Not Found
+                        "PRINTER_OFFLINE" or "NETWORK_ERROR" or "TIMEOUT" => 503, // Service Unavailable
+                        "ACCESS_DENIED" => 403, // Forbidden
+                        _ => 500 // Internal Server Error
+                    };
+
+                    _logger.LogWarning($"打印任务提交失败：{result.Message}, 错误代码={result.ErrorCode}, HTTP状态码={statusCode}");
+                    return StatusCode(statusCode, result);
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "打印操作失败");
-                return StatusCode(500, new { success = false, message = $"打印失败: {ex.Message}" });
+                _logger.LogError(ex, "打印操作发生未预期的异常");
+                var errorResponse = PrintExceptionHandler.HandleException(ex, "打印操作");
+                return StatusCode(500, errorResponse);
             }
         }
 
@@ -226,59 +231,21 @@ namespace RemotePrintService.Controllers
 
                 var result = await _printerService.PrintAsync(printRequest);
 
-                // 清理临时文件
-                if (System.IO.File.Exists(tempPath))
+                // 注册文件到清理服务，在打印完成后自动删除
+                // 这样确保 Adobe Acrobat 有足够时间打开和打印文件
+                if (result.Success && !string.IsNullOrEmpty(result.JobId))
                 {
-                    try
+                    PrintFileCleanupService.RegisterFileForCleanup(tempPath, result.JobId, _logger);
+                    _logger.LogDebug($"已注册临时文件等待打印完成后清理: {tempPath} (任务ID: {result.JobId})");
+                }
+                else
+                {
+                    // 如果打印失败，立即尝试清理文件
+                    _ = Task.Run(async () =>
                     {
-                        // 增加初始等待时间，确保打印进程完全启动并读取文件
-                        await Task.Delay(2000);
-                        
-                        // 检查文件是否仍被占用，最多等待10秒
-                        int attempts = 0;
-                        const int maxAttempts = 20; // 最多尝试20次，每次500ms
-                        
-                        while (attempts < maxAttempts)
-                        {
-                            try
-                            {
-                                // 尝试打开文件以检查是否被锁定
-                                using (var stream = System.IO.File.Open(tempPath, FileMode.Open, FileAccess.Read, FileShare.None))
-                                {
-                                    // 如果能成功打开，说明文件未被锁定，可以安全删除
-                                    stream.Close();
-                                    break;
-                                }
-                            }
-                            catch (IOException)
-                            {
-                                // 文件仍被锁定，等待后重试
-                                attempts++;
-                                if (attempts < maxAttempts)
-                                {
-                                    await Task.Delay(500);
-                                }
-                            }
-                        }
-                        
-                        // 尝试删除文件
-                        if (System.IO.File.Exists(tempPath))
-                        {
-                            try
-                            {
-                                System.IO.File.Delete(tempPath);
-                                _logger.LogInformation($"临时文件已删除：{tempPath}");
-                            }
-                            catch (Exception ex)
-                            {
-                                _logger.LogWarning(ex, $"删除临时文件失败：{tempPath}，将在应用程序退出时自动清理");
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, $"检查文件锁定状态时发生错误：{tempPath}");
-                    }
+                        await Task.Delay(2000); // 等待2秒后尝试删除
+                        PrintFileCleanupService.CleanupFileNow(tempPath);
+                    });
                 }
 
                 if (result.Success)
