@@ -61,7 +61,7 @@ RemotePrintService/
 如果需要使用网络打印机，可以在 appsettings.json 中添加如下配置：
 
 ```json
-"Printers": {
+"Printers":{
   "NetworkPrinters": [
     {
       "Name": "NetworkPrinter1",

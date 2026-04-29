@@ -44,7 +44,8 @@ namespace RemotePrintService
             
             // 注册打印机服务
             builder.Services.AddScoped<IPrinterService, LocalPrinterService>();
-
+ 
+            
             var app = builder.Build();
             
             // 预热打印机系统（解决首次打印失败问题）
