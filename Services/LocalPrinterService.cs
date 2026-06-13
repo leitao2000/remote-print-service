@@ -22,6 +22,81 @@ namespace RemotePrintService.Services
         }
 
         /// <summary>
+        /// 检测是否以 Windows 服务模式运行
+        /// </summary>
+        private static bool IsRunningAsService()
+        {
+            // 方法1: 检查父进程是否是 services.exe
+            try
+            {
+                if (TryGetParentProcessName(out var parentName) && string.Equals(parentName, "services", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            // 方法2: 检查 SESSIONNAME 环境变量
+            // 服务进程运行在 Session 0，SESSIONNAME 为空或为 "Services"
+            string? sessionName = Environment.GetEnvironmentVariable("SESSIONNAME");
+            if (string.IsNullOrEmpty(sessionName) || sessionName.Equals("Services", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            // 方法3: 检查是否有控制台窗口
+            try
+            {
+                if (!Environment.UserInteractive)
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        /// <summary>
+        /// 尝试获取父进程名称（已妥善释放 Process 资源）
+        /// </summary>
+        private static bool TryGetParentProcessName(out string? name)
+        {
+            name = null;
+            try
+            {
+                int parentPid = 0;
+                using var process = new System.Diagnostics.Process();
+                process.StartInfo.FileName = "wmic";
+                process.StartInfo.Arguments = $"process where ProcessId={Environment.ProcessId} get ParentProcessId";
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.CreateNoWindow = true;
+                process.Start();
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+
+                var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                if (lines.Length >= 2 && int.TryParse(lines[1].Trim(), out int pid))
+                {
+                    parentPid = pid;
+                }
+
+                if (parentPid > 0)
+                {
+                    using var parent = System.Diagnostics.Process.GetProcessById(parentPid);
+                    name = parent.ProcessName;
+                    return true;
+                }
+            }
+            catch
+            {
+                // 忽略，按未获取处理
+            }
+            return false;
+        }
+
+        /// <summary>
         /// 获取所有可用的本地打印机列表（带初始化预热，解决首次访问问题）
         /// </summary>
         public async Task<List<PrinterInfo>> GetAvailablePrintersAsync()
@@ -432,12 +507,15 @@ namespace RemotePrintService.Services
         {
             try
             {
+                // 使用 PowerShell 查询 Win32_PrintJob 获取打印队列任务数
+                string escapedName = printerName.Replace("'", "''");
                 var processInfo = new System.Diagnostics.ProcessStartInfo
                 {
-                    FileName = "wmic",
-                    Arguments = $"logicaldisk get name",
+                    FileName = "powershell",
+                    Arguments = $"-NoProfile -Command \"(Get-CimInstance -ClassName Win32_PrintJob | Where-Object {{ $_.PrinterName -eq '{escapedName}' }} | Measure-Object).Count\"",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
+                    RedirectStandardError = true,
                     CreateNoWindow = true
                 };
 
@@ -445,23 +523,28 @@ namespace RemotePrintService.Services
                 {
                     if (process != null)
                     {
+                        var output = await process.StandardOutput.ReadToEndAsync();
                         await process.WaitForExitAsync();
-                        return 0;
+
+                        if (int.TryParse(output.Trim(), out int count))
+                        {
+                            return count;
+                        }
                     }
                 }
             }
             catch (Exception ex)
             {
-                // 使用 Spectre.Console 显示警告信息
-                AnsiConsole.MarkupLine($"[yellow]获取打印队列计数时发生错误[/]: {printerName} - {ex.Message}");
                 _logger.LogWarning(ex, $"获取打印队列计数时发生错误: {printerName}");
             }
 
-            return await Task.FromResult(0);
+            return 0;
         }
 
         /// <summary>
         /// 打印 PDF 文件
+        /// 优先使用 SumatraPDF（支持 Windows 服务模式，无需 GUI）
+        /// 备选使用 Adobe Acrobat（仅在桌面模式下可用）
         /// </summary>
         private async Task PrintPdfAsync(string filePath, string printerName, int copies, string? paperSize = null, string? orientation = null)
         {
@@ -478,230 +561,215 @@ namespace RemotePrintService.Services
                 if (!PrinterSettings.InstalledPrinters.Contains(printerName))
                     throw new InvalidOperationException($"打印机不存在: {printerName}");
 
-                string adobeAcrobatPath = _configuration["PdfPrint:AdobeAcrobatPath"] 
-                    ?? @"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe";
-
-                if (!System.IO.File.Exists(adobeAcrobatPath))
-                {
-                    _logger.LogWarning($"Adobe Acrobat 未找到配置路径: {adobeAcrobatPath}，尝试使用默认路径");
-                    string[] commonPaths = {
-                        @"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
-                        @"C:\Program Files (x86)\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
-                        @"C:\Program Files\Adobe\Acrobat Reader DC\Acrobat\Acrobat.exe",
-                        @"C:\Program Files (x86)\Adobe\Acrobat Reader DC\Acrobat\Acrobat.exe",
-                        @"C:\Program Files\Adobe\Acrobat\Acrobat.exe",
-                        @"C:\Program Files (x86)\Adobe\Acrobat\Acrobat.exe"
-                    };
-
-                    bool found = false;
-                    foreach (string path in commonPaths)
-                    {
-                        _logger.LogDebug($"检查Adobe Acrobat路径: {path}");
-                        if (System.IO.File.Exists(path))
-                        {
-                            adobeAcrobatPath = path;
-                            found = true;
-                            _logger.LogInformation($"找到Adobe Acrobat: {path}");
-                            break;
-                        }
-                    }
-
-                    if (!found)
-                    {
-                        _logger.LogError($"未找到Adobe Acrobat，已检查以下路径:");
-                        foreach (string path in commonPaths)
-                        {
-                            _logger.LogError($"  - {path}");
-                        }
-                        throw new InvalidOperationException($"未找到 Adobe Acrobat。请确保已安装Adobe Acrobat或Adobe Reader，或通过appsettings.json配置正确的路径。已检查的路径: {string.Join(", ", commonPaths)}");
-                    }
-                }
-                else
-                {
-                    _logger.LogInformation($"使用配置的Adobe Acrobat路径: {adobeAcrobatPath}");
-                }
-
                 if (!string.IsNullOrEmpty(paperSize) || !string.IsNullOrEmpty(orientation))
                 {
                     _logger.LogInformation($"请求的打印参数: 纸张={paperSize}, 方向={orientation}");
-                    
-                    if (!string.IsNullOrEmpty(orientation) && orientation.ToLower() == "landscape")
-                    {
-                        _logger.LogWarning("请求横向打印: 请确保打印机已设置为横向模式");
-                    }
                 }
 
-                // 将文件路径转换为绝对路径，确保Adobe Acrobat能够找到文件
                 string absoluteFilePath = Path.GetFullPath(filePath);
-                
-                // 验证绝对路径文件存在（在启动进程前再次检查）
-                if (!System.IO.File.Exists(absoluteFilePath))
-                {
-                    _logger.LogError($"文件不存在（绝对路径）: {absoluteFilePath} (原始路径: {filePath})");
-                    throw new FileNotFoundException($"文件不存在或已被删除: {absoluteFilePath}");
-                }
 
-                // 获取文件所在目录作为工作目录
-                string? fileDirectory = Path.GetDirectoryName(absoluteFilePath);
-                if (string.IsNullOrEmpty(fileDirectory))
-                {
-                    _logger.LogWarning($"无法获取文件目录，使用当前工作目录");
-                    fileDirectory = Directory.GetCurrentDirectory();
-                }
+                if (!System.IO.File.Exists(absoluteFilePath))
+                    throw new FileNotFoundException($"文件不存在或已被删除: {absoluteFilePath}");
 
                 // 验证文件可读
-                try
-                {
-                    using (var fileStream = System.IO.File.OpenRead(absoluteFilePath))
-                    {
-                        // 文件可读，继续
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, $"文件无法读取: {absoluteFilePath}");
-                    throw new IOException($"文件无法读取: {absoluteFilePath}", ex);
-                }
+                using (var fs = System.IO.File.OpenRead(absoluteFilePath)) { }
 
-                // 转义文件路径中的特殊字符，确保路径正确传递给Adobe Acrobat
-                // 使用双引号包裹路径，并转义路径中的引号
-                string escapedFilePath = absoluteFilePath.Replace("\"", "\\\"");
-                string escapedPrinterName = printerName.Replace("\"", "\\\"");
+                // 读取配置的打印方式：Auto / SumatraPDF / Acrobat
+                string printMethod = (_configuration["PdfPrint:PrintMethod"] ?? "Auto").Trim();
+                _logger.LogInformation($"配置的打印方式: {printMethod}");
 
-                var printProcess = new System.Diagnostics.ProcessStartInfo
+                switch (printMethod.ToLower())
                 {
-                    FileName = adobeAcrobatPath,
-                    Arguments = $"/t \"{escapedFilePath}\" \"{escapedPrinterName}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
-                    WorkingDirectory = fileDirectory // 设置工作目录为文件所在目录
-                };
-
-                _logger.LogInformation($"执行 Adobe Acrobat 打印命令:");
-                _logger.LogInformation($"  程序路径: {adobeAcrobatPath}");
-                _logger.LogInformation($"  文件路径: {absoluteFilePath}");
-                _logger.LogInformation($"  打印机: {printerName}");
-                _logger.LogInformation($"  工作目录: {fileDirectory}");
-                _logger.LogInformation($"  完整命令: {adobeAcrobatPath} /t \"{escapedFilePath}\" \"{escapedPrinterName}\"");
-
-                // 尝试启动进程，并捕获启动失败的情况
-                System.Diagnostics.Process? process = null;
-                try
-                {
-                    process = System.Diagnostics.Process.Start(printProcess);
+                    case "sumatrapdf":
+                        await PrintWithSumatraPdfConfigured(absoluteFilePath, printerName, copies);
+                        break;
+                    case "acrobat":
+                        await PrintWithAcrobatConfigured(absoluteFilePath, printerName);
+                        break;
+                    default: // Auto
+                        await PrintWithAutoMethod(absoluteFilePath, printerName, copies);
+                        break;
                 }
-                catch (System.ComponentModel.Win32Exception win32Ex)
-                {
-                    _logger.LogError(win32Ex, $"无法启动Adobe Acrobat进程: 错误代码={win32Ex.NativeErrorCode}, 错误消息={win32Ex.Message}");
-                    throw new InvalidOperationException($"无法启动Adobe Acrobat进程: {win32Ex.Message} (错误代码: {win32Ex.NativeErrorCode})。请检查：1) Adobe Acrobat是否已安装；2) 程序路径是否正确；3) 是否有执行权限", win32Ex);
-                }
-                catch (Exception startEx)
-                {
-                    _logger.LogError(startEx, $"启动Adobe Acrobat进程时发生未知错误: {startEx.GetType().Name}, 消息={startEx.Message}");
-                    throw new InvalidOperationException($"启动Adobe Acrobat进程失败: {startEx.Message}", startEx);
-                }
-                
-                if (process != null)
-                {
-                    int processId = process.Id;
-                    _logger.LogInformation($"Adobe Acrobat 打印进程已启动，PID: {processId}");
-                    
-                    // 等待进程启动完成（首次启动可能需要更多时间）
-                    // 使用短时间等待确保进程已启动，但不会阻塞太久
-                    try
-                    {
-                        // 等待进程启动（首次启动 Adobe Acrobat 可能需要更长时间来打开文件）
-                        await Task.Delay(1000); // 增加到1秒，确保进程有足够时间打开文件
-                        if (!process.HasExited)
-                        {
-                            _logger.LogDebug("Adobe Acrobat 打印进程已成功启动");
-                        }
-                        else
-                        {
-                            _logger.LogWarning($"Adobe Acrobat 打印进程已退出，退出代码: {process.ExitCode}");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "等待Adobe Acrobat进程启动时发生错误，继续执行");
-                    }
-                    
-                    // 等待进程退出后再删除文件（确保打印完成）
-                    // 进程会在后台继续执行打印任务，完成后删除文件
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            // 确保进程对象仍然有效
-                            if (process != null && !process.HasExited)
-                            {
-                                await process.WaitForExitAsync();
-                                int exitCode = process.ExitCode;
-                                _logger.LogInformation($"Adobe Acrobat 打印进程已退出，PID: {processId}, 退出代码: {exitCode}");
-                                
-                                if (exitCode != 0)
-                                {
-                                    _logger.LogWarning($"Adobe Acrobat 打印进程返回非零退出代码: {exitCode}");
-                                }
-                                
-                                // 打印完成后，标记文件可以删除（使用绝对路径）
-                                PrintFileCleanupService.MarkFileReadyForCleanup(absoluteFilePath, delayMs: 3000, _logger);
-                            }
-                            else if (process != null)
-                            {
-                                // 进程已经退出
-                                int exitCode = process.ExitCode;
-                                _logger.LogInformation($"Adobe Acrobat 打印进程已退出，PID: {processId}, 退出代码: {exitCode}");
-                                
-                                // 打印完成后，标记文件可以删除（使用绝对路径）
-                                PrintFileCleanupService.MarkFileReadyForCleanup(absoluteFilePath, delayMs: 3000, _logger);
-                            }
-                        }
-                        catch (InvalidOperationException)
-                        {
-                            // 进程对象已释放或不再关联，这是正常的，因为进程可能已经退出
-                            _logger.LogDebug($"Adobe Acrobat 打印进程 (PID: {processId}) 已退出或对象已释放");
-                            
-                            // 即使出现异常，也尝试标记文件可以删除（延迟更长时间以确保安全，使用绝对路径）
-                            PrintFileCleanupService.MarkFileReadyForCleanup(absoluteFilePath, delayMs: 5000, _logger);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogWarning(ex, $"等待Adobe Acrobat进程退出时发生错误 (PID: {processId})");
-                            
-                            // 即使出现异常，也尝试标记文件可以删除（延迟更长时间以确保安全，使用绝对路径）
-                            PrintFileCleanupService.MarkFileReadyForCleanup(absoluteFilePath, delayMs: 5000, _logger);
-                        }
-                        finally
-                        {
-                            // 确保释放进程对象
-                            try
-                            {
-                                process?.Dispose();
-                            }
-                            catch
-                            {
-                                // 忽略释放时的异常
-                            }
-                        }
-                    });
-                }
-                else
-                {
-                    _logger.LogError($"无法启动 Adobe Acrobat 打印进程: Process.Start返回null");
-                    _logger.LogError($"可能的原因: 1) Adobe Acrobat未安装; 2) 程序路径错误: {adobeAcrobatPath}; 3) 权限不足; 4) 文件路径无效: {absoluteFilePath}");
-                    throw new InvalidOperationException($"无法启动 Adobe Acrobat 打印进程。请检查：1) Adobe Acrobat是否已安装在 {adobeAcrobatPath}；2) 文件是否存在: {absoluteFilePath}；3) 是否有执行权限");
-                }
-
-                _logger.LogInformation($"PDF 文件已成功发送到打印机 '{printerName}'");
-                await Task.CompletedTask;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, $"PDF 打印失败: {filePath}");
                 throw;
             }
+        }
+
+        /// <summary>
+        /// 配置指定使用 SumatraPDF 打印
+        /// </summary>
+        private async Task PrintWithSumatraPdfConfigured(string filePath, string printerName, int copies)
+        {
+            string sumatraPath = _configuration["PdfPrint:SumatraPdfPath"] ?? string.Empty;
+            if (!System.IO.File.Exists(sumatraPath))
+            {
+                throw new InvalidOperationException(
+                    $"配置指定使用 SumatraPDF，但未找到程序: {sumatraPath}。" +
+                    "请下载 SumatraPDF 并配置 PdfPrint:SumatraPdfPath。" +
+                    "下载地址: https://www.sumatrapdfreader.org/download-free-pdf-viewer");
+            }
+            await PrintWithSumatraPdfAsync(sumatraPath, filePath, printerName, copies);
+        }
+
+        /// <summary>
+        /// 配置指定使用 Adobe Acrobat 打印
+        /// </summary>
+        private async Task PrintWithAcrobatConfigured(string filePath, string printerName)
+        {
+            string adobeAcrobatPath = FindAdobeAcrobat();
+            await PrintWithAcrobatAsync(adobeAcrobatPath, filePath, printerName);
+        }
+
+        /// <summary>
+        /// 自动选择打印方式（SumatraPDF 优先，Acrobat 备选）
+        /// </summary>
+        private async Task PrintWithAutoMethod(string filePath, string printerName, int copies)
+        {
+            // 优先 SumatraPDF（服务模式可用）
+            string sumatraPath = _configuration["PdfPrint:SumatraPdfPath"] ?? string.Empty;
+            if (System.IO.File.Exists(sumatraPath))
+            {
+                _logger.LogInformation($"自动选择 SumatraPDF 打印: {sumatraPath}");
+                await PrintWithSumatraPdfAsync(sumatraPath, filePath, printerName, copies);
+                return;
+            }
+
+            // 备选 Adobe Acrobat（仅桌面模式可用）
+            if (IsRunningAsService())
+            {
+                throw new InvalidOperationException(
+                    "当前运行在 Windows 服务模式下，但未找到 SumatraPDF。" +
+                    "服务模式下无法使用 Adobe Acrobat 打印。" +
+                    "请下载 SumatraPDF 并配置 PdfPrint:SumatraPdfPath，" +
+                    "或将 PdfPrint:PrintMethod 改为 SumatraPDF 或 Acrobat。" +
+                    "下载地址: https://www.sumatrapdfreader.org/download-free-pdf-viewer");
+            }
+
+            string adobeAcrobatPath = FindAdobeAcrobat();
+            _logger.LogInformation($"自动选择 Adobe Acrobat 打印: {adobeAcrobatPath}");
+            await PrintWithAcrobatAsync(adobeAcrobatPath, filePath, printerName);
+        }
+
+        /// <summary>
+        /// 使用 SumatraPDF 打印（支持服务模式，无需 GUI）
+        /// </summary>
+        private async Task PrintWithSumatraPdfAsync(string sumatraPath, string filePath, string printerName, int copies)
+        {
+            for (int i = 0; i < copies; i++)
+            {
+                var startInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = sumatraPath,
+                    Arguments = $"-print-to \"{printerName}\" \"{filePath}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
+                };
+
+                _logger.LogInformation($"SumatraPDF 打印命令: \"{sumatraPath}\" -print-to \"{printerName}\" \"{filePath}\" (第 {i + 1}/{copies} 份)");
+
+                using var process = System.Diagnostics.Process.Start(startInfo);
+                if (process == null)
+                    throw new InvalidOperationException("无法启动 SumatraPDF 进程");
+
+                await process.WaitForExitAsync();
+
+                if (process.ExitCode != 0)
+                    _logger.LogWarning($"SumatraPDF 进程退出码: {process.ExitCode}（第 {i + 1} 份）");
+                else
+                    _logger.LogInformation($"SumatraPDF 打印完成（第 {i + 1}/{copies} 份）");
+            }
+
+            PrintFileCleanupService.MarkFileReadyForCleanup(filePath, delayMs: 3000, _logger);
+        }
+
+        /// <summary>
+        /// 使用 Adobe Acrobat 打印（仅桌面模式可用）
+        /// </summary>
+        private async Task PrintWithAcrobatAsync(string acrobatPath, string filePath, string printerName)
+        {
+            string? fileDirectory = Path.GetDirectoryName(filePath);
+
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = acrobatPath,
+                Arguments = $"/t \"{filePath}\" \"{printerName}\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
+                WorkingDirectory = fileDirectory
+            };
+
+            _logger.LogInformation($"Acrobat 打印命令: \"{acrobatPath}\" /t \"{filePath}\" \"{printerName}\"");
+
+            System.Diagnostics.Process? process = null;
+            try
+            {
+                process = System.Diagnostics.Process.Start(startInfo);
+            }
+            catch (System.ComponentModel.Win32Exception win32Ex)
+            {
+                throw new InvalidOperationException($"无法启动 Adobe Acrobat: {win32Ex.Message}", win32Ex);
+            }
+
+            if (process == null)
+                throw new InvalidOperationException("无法启动 Adobe Acrobat 进程");
+
+            // 后台等待进程退出后清理文件
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await process.WaitForExitAsync();
+                    _logger.LogInformation($"Acrobat 打印进程已退出，退出码: {process.ExitCode}");
+                    PrintFileCleanupService.MarkFileReadyForCleanup(filePath, delayMs: 3000, _logger);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "等待 Acrobat 进程退出时发生错误");
+                    PrintFileCleanupService.MarkFileReadyForCleanup(filePath, delayMs: 5000, _logger);
+                }
+                finally
+                {
+                    process.Dispose();
+                }
+            });
+
+            await Task.Delay(1000); // 等待进程启动
+        }
+
+        /// <summary>
+        /// 查找 Adobe Acrobat 安装路径
+        /// </summary>
+        private string FindAdobeAcrobat()
+        {
+            string configuredPath = _configuration["PdfPrint:AdobeAcrobatPath"]
+                ?? @"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe";
+
+            if (System.IO.File.Exists(configuredPath))
+                return configuredPath;
+
+            string[] fallbackPaths = {
+                @"C:\Program Files\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
+                @"C:\Program Files (x86)\Adobe\Acrobat DC\Acrobat\Acrobat.exe",
+                @"C:\Program Files\Adobe\Acrobat Reader DC\Acrobat\Acrobat.exe",
+                @"C:\Program Files (x86)\Adobe\Acrobat Reader DC\Acrobat\Acrobat.exe",
+            };
+
+            foreach (var path in fallbackPaths)
+            {
+                if (System.IO.File.Exists(path))
+                {
+                    _logger.LogInformation($"找到 Adobe Acrobat: {path}");
+                    return path;
+                }
+            }
+
+            throw new InvalidOperationException(
+                "未找到 Adobe Acrobat。请安装 Adobe Acrobat 或配置 PdfPrint:AdobeAcrobatPath。");
         }
 
         /// <summary>

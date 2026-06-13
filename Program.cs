@@ -42,8 +42,13 @@ namespace RemotePrintService
             // 添加 OpenAPI 支持
             builder.Services.AddOpenApi();
             
-            // 注册打印机服务
-            builder.Services.AddScoped<IPrinterService, LocalPrinterService>();
+            // 添加 CORS 服务
+            builder.Services.AddCors();
+            
+            // 注册打印机服务（本地 + 网络组合服务）
+            builder.Services.AddScoped<LocalPrinterService>();
+            builder.Services.AddScoped<NetworkPrinterService>();
+            builder.Services.AddScoped<IPrinterService, CompositePrinterService>();
  
             
             var app = builder.Build();
@@ -70,8 +75,64 @@ namespace RemotePrintService
             // 启用 OpenAPI 文档（无论什么环境都启用）
             app.MapOpenApi();
 
+            // 全局异常处理中间件
+            app.Use(async (context, next) =>
+            {
+                try
+                {
+                    await next();
+                }
+                catch (Exception ex)
+                {
+                    var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+                    logger.LogError(ex, "未处理的异常: {Method} {Path}", context.Request.Method, context.Request.Path);
+
+                    context.Response.StatusCode = 500;
+                    context.Response.ContentType = "application/json";
+                    await context.Response.WriteAsJsonAsync(new
+                    {
+                        success = false,
+                        message = "服务器内部错误",
+                        errorCode = "UNHANDLED_EXCEPTION"
+                    });
+                }
+            });
+
+            // 请求日志中间件
+            app.Use(async (context, next) =>
+            {
+                var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
+                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                var method = context.Request.Method;
+                var path = context.Request.Path;
+
+                logger.LogInformation("请求开始: {Method} {Path}", method, path);
+
+                await next();
+
+                stopwatch.Stop();
+                var statusCode = context.Response.StatusCode;
+                var level = statusCode >= 400 ? LogLevel.Warning : LogLevel.Information;
+                logger.Log(level, "请求完成: {Method} {Path} -> {StatusCode} ({ElapsedMs}ms)",
+                    method, path, statusCode, stopwatch.ElapsedMilliseconds);
+            });
+
+            // CORS 配置
+            app.UseCors(policy => policy
+                .AllowAnyOrigin()
+                .AllowAnyMethod()
+                .AllowAnyHeader());
+
             // 添加授权中间件
             app.UseAuthorization();
+
+            // 健康检查端点
+            app.MapGet("/health", () => Results.Ok(new
+            {
+                status = "healthy",
+                timestamp = DateTime.UtcNow,
+                service = "RemotePrintService"
+            })).ExcludeFromDescription();
 
             // 配置 Scalar API 文档界面（无论什么环境都启用）
             app.MapScalarApiReference(options =>

@@ -1,202 +1,200 @@
-# RemotePrintService 远程打印服务 DEV
+# RemotePrintService 操作手册
 
-## 项目概述
+## 1. 项目简介
 
-RemotePrintService 是一个基于 ASP.NET Core 的远程打印服务，支持本地打印机和网络打印机的打印操作。该服务提供了 RESTful API 接口，可以通过 HTTP 请求执行各种打印任务。
+RemotePrintService 是基于 ASP.NET Core 的远程打印服务，提供 RESTful API 用于：
 
-本项目集成了 [Spectre.Console](https://github.com/spectreconsole/spectre.console) 来提供美观的控制台输出效果，包括彩色文本、表格、进度条等。
+- 获取本地/网络打印机列表与状态
+- 执行打印任务（支持 PDF、TXT 等）
+- 生成/打印标签 PDF
 
-## 功能特性
+服务默认监听端口：`5035`
 
-- 获取可用打印机列表
-- 检查打印机状态（在线/离线）
-- 查询打印队列任务数
-- 支持多种文件格式打印（PDF、TXT等）
-- 支持文件上传并直接打印
-- 支持指定打印份数、双面打印等参数
-- 使用 Spectre.Console 提供美观的控制台输出
+---
 
-## 技术栈
+## 2. 环境与依赖
 
-- ASP.NET Core 9.0
-- Scalar.AspNetCore（API 文档）
-- System.Drawing.Common（打印支持）
-- PDFsharp（PDF 处理）
-- Spectre.Console（增强控制台输出）
+- Windows 10/11 或 Windows Server 2016+
+- .NET SDK（项目目标：.NET 10）
+- 打印机驱动已安装并可用
+- PDF 打印建议方案：
+  - 推荐：SumatraPDF（可命令行静默打印，适合 Windows 服务）
+  - 可选：Adobe Acrobat/Reader（需要桌面交互，服务模式可能受限）
 
-## 项目结构
+---
 
-```
-RemotePrintService/
-├── Controllers/           # 控制器层
-│   ├── PrinterController.cs    # 打印机相关API控制器
-│   └── LabelController.cs      # 标签生成和打印API控制器
-├── Models/                # 数据模型
-│   ├── PrintRequest.cs         # 打印请求模型
-│   ├── PrintResponse.cs        # 打印响应模型
-│   └── PrinterInfo.cs          # 打印机信息模型
-├── Services/              # 服务层
-│   ├── IPrinterService.cs      # 打印机服务接口
-│   ├── LocalPrinterService.cs  # 本地打印机服务实现
-│   └── NetworkPrinterService.cs# 网络打印机服务实现
-├── Properties/            # 项目属性配置
-├── appsettings.json       # 应用程序配置文件
-└── Program.cs             # 应用程序入口点
+## 3. 快速开始（本地运行）
+
+### 3.1 还原与运行
+
+```powershell
+cd remote-printing-service
+dotnet restore
+dotnet run
 ```
 
-## 配置说明
+启动后访问 API 文档：
 
-### appsettings.json
+- Scalar API：`http://localhost:5035/scalar/v1`
+- OpenAPI JSON：`http://localhost:5035/openapi/v1.json`
 
-主要的应用程序配置文件，包含以下配置项：
+### 3.2 验证服务
 
-- Logging: 日志配置
-- AllowedHosts: 允许的主机地址
-- PdfPrint: PDF 打印相关配置
-  - AdobeAcrobatPath: Adobe Acrobat 应用程序路径
-  - PaperSize: 纸张尺寸配置
+```powershell
+Invoke-RestMethod http://localhost:5035/api/printer/list
+```
 
-### 网络打印机配置示例
+---
 
-如果需要使用网络打印机，可以在 appsettings.json 中添加如下配置：
+## 4. 配置说明
+
+配置文件：`appsettings.json`
+
+### 4.1 监听与基础配置
+
+服务在 `Program.cs` 中绑定 `0.0.0.0:5035`。如需修改端口，请修改 `Program.cs` 中的 `ListenAnyIP(5035)`。
+
+### 4.2 打印配置示例
 
 ```json
-"Printers":{
-  "NetworkPrinters": [
-    {
-      "Name": "NetworkPrinter1",
-      "IpAddress": "192.168.1.100",
-      "Port": "9100",
-      "IsDefault": true,
-      "Description": "办公室网络打印机"
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
     }
-  ],
-  "DefaultPrinter": "NetworkPrinter1"
+  },
+  "AllowedHosts": "*",
+  "PdfPrint": {
+    "AdobeAcrobatPath": "C:\\Program Files\\Adobe\\Acrobat DC\\Acrobat\\Acrobat.exe",
+    "UseShellExecute": true,
+    "PaperSize": {
+      "Width": 80,
+      "Height": 60,
+      "Unit": "mm"
+    }
+  },
+  "PrintSettings": {
+    "ImmediatePrint": true
+  }
 }
 ```
 
-### launchSettings.json
+> 提示：如果后续接入 SumatraPDF，建议新增配置项 `PdfPrint:SumatraPdfPath` 并在代码中优先使用该工具。
 
-开发环境的启动配置，定义了不同的运行环境：
+---
 
-- http: HTTP 协议运行配置
-- https: HTTPS 协议运行配置
-- IIS Express: IIS Express 运行配置
+## 5. Windows 服务化部署
 
-## API 接口说明
+### 5.1 发布
 
-### 打印机管理接口
-
-#### 获取打印机列表
-```
-GET /api/printer/list
+```powershell
+dotnet publish -c Release -o ./publish
 ```
 
-#### 获取打印机信息
-```
-GET /api/printer/{printerName}
-```
+### 5.2 注册为 Windows 服务
 
-#### 检查打印机状态
-```
-GET /api/printer/{printerName}/status
+```powershell
+sc create RemotePrintService binPath= "C:\Path\To\publish\RemotePrintService.exe" start= auto
+sc start RemotePrintService
 ```
 
-#### 获取打印队列任务数
-```
-GET /api/printer/{printerName}/queue-count
-```
+### 5.3 服务模式注意事项
 
-#### 执行打印操作
-```
-POST /api/printer/print
-Content-Type: application/json
+- Windows 服务运行在 Session 0，GUI 程序可能无法正常交互。
+- 打印 PDF 推荐使用支持命令行静默打印的工具（如 SumatraPDF），避免依赖 GUI 程序。
 
-{
-  "filePath": "文件路径",
-  "printerName": "打印机名称（可选）",
-  "copies": 1,
-  "doubleSided": false,
-  "paperSize": "A4",
-  "orientation": "Portrait"
-}
+---
+
+## 6. API 使用指南
+
+### 6.1 打印机管理
+
+- 获取打印机列表
+
+```powershell
+Invoke-RestMethod http://localhost:5035/api/printer/list
 ```
 
-#### 上传文件并打印
-```
-POST /api/printer/print-file
-Content-Type: multipart/form-data
+- 获取指定打印机信息
 
-文件参数: file
-打印机名称: printerName（可选）
-打印份数: copies（可选）
-双面打印: doubleSided（可选）
-纸张尺寸: paperSize（可选）
+```powershell
+Invoke-RestMethod http://localhost:5035/api/printer/{printerName}
 ```
 
-### 标签生成接口
+- 检查打印机状态
 
-#### 生成标签PDF
-```
-POST /api/label/generate-label
-Content-Type: application/json
-
-{
-  "number": 123
-}
+```powershell
+Invoke-RestMethod http://localhost:5035/api/printer/{printerName}/status
 ```
 
-#### 生成标签并打印
-```
-POST /api/label/print-label
-Content-Type: application/json
+- 诊断环境
 
-{
-  "number": 123,
-  "printerName": "打印机名称（可选）"
-}
+```powershell
+Invoke-RestMethod http://localhost:5035/api/printer/diagnostics
 ```
 
-## 使用说明
+### 6.2 执行打印
 
-1. 确保系统已安装所需的打印机驱动程序
-2. 对于 PDF 打印，需要安装 Adobe Acrobat 或 Adobe Reader
-3. 配置 appsettings.json 中的打印机相关参数
-4. 运行应用程序
-5. 通过 API 接口执行打印操作
+```powershell
+$body = @{
+  filePath = "C:\Temp\doc.pdf"
+  printerName = "HP LaserJet"
+  copies = 1
+  doubleSided = $false
+  paperSize = "A4"
+  orientation = "Portrait"
+} | ConvertTo-Json
 
-## 控制台输出增强
-
-本项目使用 Spectre.Console 库来提供增强的控制台输出效果：
-
-### 启动画面
-- 使用 Figlet 字体显示应用标题
-- 彩色文本显示服务状态信息
-
-### 运行时输出
-- 彩色日志信息（绿色表示成功，黄色表示警告，红色表示错误）
-- 表格形式显示打印机列表
-- 进度条显示长时间运行的操作
-
-### 示例输出效果
-```
-____ ____ ___  ____ ____ ____ _  _ ____ ___ ____ ____ 
-|__/ |___ |__] |  | |__/ |___ |\ | | __  |  |___ [__  
-|  \ |___ |    |__| |  \ |___ | \| |__]  |  |___ ___]
-
-正在启动远程打印服务...
-
-远程打印服务启动完成！
-
-运行环境: Development
-监听地址: http://localhost:5035
-API 文档地址: http://localhost:5035/scalar/v2-beta
+Invoke-RestMethod -Method Post -Uri http://localhost:5035/api/printer/print -Body $body -ContentType "application/json"
 ```
 
-## 日志记录
+### 6.3 标签打印
 
-应用程序使用内置的日志系统记录操作日志和错误信息，便于问题排查和系统监控。
+```powershell
+Invoke-RestMethod -Method Post -Uri http://localhost:5035/api/label/generate-label -Body '{"number": 123}' -ContentType "application/json"
+```
 
-## 错误处理
+---
 
-服务具有完善的错误处理机制，对于各种异常情况都会返回相应的错误信息和 HTTP 状态码。
+## 7. 常见问题与排查
+
+### 7.1 首次请求慢或失败
+
+- 服务启动时会进行打印机系统预热，首次请求可能有延迟。
+- 检查 `diagnostics` 接口确认打印机可见性。
+
+### 7.2 PDF 打印失败
+
+- 确认 PDF 路径可访问，文件未被锁定。
+- 检查打印机名称与状态是否正确。
+- 若运行在 Windows 服务，避免使用需要桌面的 Acrobat，改用命令行打印工具。
+
+### 7.3 权限问题
+
+- 确保运行服务的账户有权访问打印机与文件目录。
+- 对于网络打印机，确认网络连通性与端口开放。
+
+---
+
+## 8. 日志与监控
+
+- 控制台输出集成了 Spectre.Console，便于阅读。
+- 应用日志通过 ASP.NET Core Logging 输出到控制台/文件（按配置）。
+- 关键操作建议结合 Windows 事件查看器与应用日志联合排查。
+
+---
+
+## 9. 安全建议
+
+- 生产环境请启用 HTTPS 并配置授权策略。
+- 对外开放 API 建议加认证鉴权，避免未授权打印。
+- 限制可打印目录与文件类型，降低风险。
+
+---
+
+## 10. 维护与升级
+
+- 升级时先备份 `appsettings.json` 与发布目录。
+- 升级 .NET 版本前确认目标框架与依赖兼容性。
+- 如需回滚，保留上一版本发布包即可快速切换。
